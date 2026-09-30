@@ -11,12 +11,12 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.dataset as ds
 
 from data_sys.data_query import EXIT_FAILED, EXIT_OK, run
-from data_sys.duckdb_verify import verify_dataset
 from data_sys.errors import DownloadError
 from data_sys.storage import read_partitioned
-from tests.helpers import FakeProvider, make_raw_frame
+from tests.helpers import NEVER_NULL_COLUMNS, FakeProvider, make_raw_frame
 
 
 def _live_dir(data_root: Path) -> Path:
@@ -45,14 +45,23 @@ def test_pipeline_end_to_end(tmp_path: Path) -> None:
     ]
 
     live = _live_dir(tmp_path)
-    report = verify_dataset(live)
-    assert report.ok, report.issues
-    assert report.n_rows == 400
-    assert report.column_types["date"] == "DATE"
-    assert report.column_types["symbol"] == "VARCHAR"
 
+    # Read the published tree back with PyArrow only.  Every update replaces
+    # these paths in place, and DuckDB caches file handles per path, so this
+    # process must never hand the live dataset to DuckDB (see data_sys.summary).
     frame = read_partitioned(live)
+    assert len(frame) == 400
     assert list(frame["symbol"].unique()) == ["AAPL"]
+    assert str(frame["date"].min().date()) == "2020-01-02"
+    assert not frame.duplicated(subset=["symbol", "date"]).any()
+    assert not frame[list(NEVER_NULL_COLUMNS)].isna().any().any()
+    assert set(frame["year"].unique()) == {2020, 2021}  # Hive keys rebuilt from the paths
+
+    # the physical types are pinned in the parquet files themselves
+    schema = ds.dataset(live, format="parquet", partitioning="hive").schema
+    assert str(schema.field("date").type) == "date32[day]"
+    assert str(schema.field("symbol").type) == "string"
+    assert str(schema.field("close").type) == "double"
 
     # raw layer keeps the untouched vendor frame plus its sidecar
     raw_dir = tmp_path / "raw" / "market_bars" / "AAPL"

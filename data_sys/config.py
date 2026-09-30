@@ -12,7 +12,8 @@ Layout::
       standardized/market_bars/            # Hive partitioned by symbol & year
       .staging/<run_id>/                   # atomic publish workspace
       .trash/<run_id>/                     # previous version backup during swap
-      metadata/run_<run_id>.json           # per-run reproducibility record
+      metadata/run_<run_id>.json           # per-symbol reproducibility record
+      metadata/batch_<batch_run_id>.json   # per-batch universe summary
 """
 
 from __future__ import annotations
@@ -27,6 +28,10 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 
 DEFAULT_SYMBOL: str = "AAPL"
 DEFAULT_START: date = date(2020, 1, 1)
+
+#: NYSE sessions re-downloaded on every incremental update so that Yahoo's
+#: retroactive corrections to recent prices / adjustment factors are picked up.
+DEFAULT_REFRESH_OVERLAP_SESSIONS: int = 5
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,11 @@ class PipelineConfig:
     def raw_dir(self) -> Path:
         """Directory holding untouched provider downloads."""
         return self.data_root / "raw" / "market_bars"
+
+    @property
+    def raw_symbol_dir(self) -> Path:
+        """Directory holding this symbol's untouched provider downloads."""
+        return self.raw_dir / self.symbol
 
     # -- standardized --------------------------------------------------------
     @property
@@ -83,10 +93,15 @@ class PipelineConfig:
         """Path of the metadata file for ``run_id``."""
         return self.metadata_dir / f"run_{run_id}.json"
 
+    def batch_metadata_path(self, batch_run_id: str) -> Path:
+        """Path of the batch summary metadata file for ``batch_run_id``."""
+        return self.metadata_dir / f"batch_{batch_run_id}.json"
+
 
 __all__ = [
     "PROJECT_ROOT",
     "DEFAULT_SYMBOL",
     "DEFAULT_START",
+    "DEFAULT_REFRESH_OVERLAP_SESSIONS",
     "PipelineConfig",
 ]

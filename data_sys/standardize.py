@@ -7,7 +7,10 @@ Rules enforced here (see :mod:`data_sys.schema`):
 * ``date`` is a timezone-naive daily date (exchange trading day),
 * prices/``volume`` are cast to ``float64`` / ``int64``,
 * ``adjusted_close`` is Yahoo's ``Adj Close`` (kept as one field, not derived),
-* ``daily_return`` (first row null) and ``dollar_volume`` are derived.
+* ``daily_return`` (first row null) is the **adjusted-close** return and
+  ``dollar_volume`` (``close × volume``) are derived -- see
+  :func:`derive_features`, the single definition shared by the first full
+  download and by every incremental merge.
 
 Null / type problems are *not* silently dropped here: values that cannot be
 coerced are left as ``NaN`` so the quality stage can report them precisely.
@@ -42,6 +45,31 @@ def _ensure_date_column(raw: pd.DataFrame) -> pd.DataFrame:
             frame.index.name = "Date"
         frame = frame.reset_index()
     return frame
+
+
+def derive_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Recompute the derived columns from an ordered, standardized frame.
+
+    This is the **only** place the two derived columns are defined, so a first
+    download and an incremental merge can never disagree about them.
+
+    ``daily_return``
+        Return of ``adjusted_close``, which is the contract: the unadjusted OHLC
+        reflects the real traded price, while ``adjusted_close`` removes
+        split/dividend jumps, so it is the only series whose returns are
+        comparable across a corporate action.  The first row is ``NaN`` because
+        it has no predecessor, which the quality schema requires.
+    ``dollar_volume``
+        ``close × volume``: liquidity is measured in dollars *actually* traded,
+        so this deliberately uses the unadjusted close.
+
+    ``frame`` must already be sorted by date.  A copy is returned; the input is
+    left untouched.
+    """
+    out = frame.copy()
+    out["daily_return"] = out["adjusted_close"].pct_change()
+    out["dollar_volume"] = out["close"] * out["volume"]
+    return out
 
 
 def standardize_bars(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -94,10 +122,9 @@ def standardize_bars(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
     out = out.sort_values("date", kind="stable").reset_index(drop=True)
 
     # -- derived features ---------------------------------------------------
-    out["daily_return"] = out["close"].pct_change()
-    out["dollar_volume"] = out["close"] * out["volume"]
+    out = derive_features(out)
 
     return out[STANDARD_COLUMNS]
 
 
-__all__ = ["standardize_bars", "PRICE_COLUMNS", "REQUIRED_STANDARD_COLUMNS"]
+__all__ = ["standardize_bars", "derive_features", "PRICE_COLUMNS", "REQUIRED_STANDARD_COLUMNS"]

@@ -25,6 +25,29 @@ class StandardizationError(DataPipelineError):
     """Raised when raw data cannot be mapped to the standardized schema."""
 
 
+class UniverseError(DataPipelineError):
+    """Raised when the security master / universe configuration is invalid.
+
+    Attributes
+    ----------
+    problems:
+        Human readable descriptions of every violation found.  The whole file is
+        validated before raising, so one run reports *all* mistakes instead of
+        only the first one.
+    """
+
+    def __init__(self, message: str, problems: Sequence[str] | None = None) -> None:
+        self.problems: list[str] = list(problems) if problems else []
+        if self.problems:
+            detail = "\n  - " + "\n  - ".join(self.problems)
+            message = f"{message}{detail}"
+        super().__init__(message)
+
+
+class CalendarError(DataPipelineError):
+    """Raised when the exchange trading calendar cannot be loaded or used."""
+
+
 class QualityCheckError(DataPipelineError):
     """Raised when standardized data violates one or more quality rules.
 
@@ -52,11 +75,18 @@ class DuckDBVerificationError(DataPipelineError):
     """Raised when the DuckDB verification layer cannot confirm the dataset."""
 
 
+class DatasetSummaryError(DataPipelineError):
+    """Raised when a summary of the published dataset cannot be produced."""
+
+
 __all__ = [
     "DataPipelineError",
     "DownloadError",
     "StandardizationError",
+    "UniverseError",
+    "CalendarError",
     "QualityCheckError",
     "PublishError",
     "DuckDBVerificationError",
+    "DatasetSummaryError",
 ]

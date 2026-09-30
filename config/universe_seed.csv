@@ -1,0 +1,21 @@
+symbol,name,exchange,security_type,is_active
+AAPL,Apple Inc.,NASDAQ,common_stock,true
+MSFT,Microsoft Corporation,NASDAQ,common_stock,true
+NVDA,NVIDIA Corporation,NASDAQ,common_stock,true
+AMZN,"Amazon.com, Inc.",NASDAQ,common_stock,true
+GOOGL,Alphabet Inc.,NASDAQ,common_stock,true
+META,Meta Platforms Inc.,NASDAQ,common_stock,true
+TSLA,Tesla Inc.,NASDAQ,common_stock,true
+AVGO,Broadcom Inc.,NASDAQ,common_stock,true
+COST,Costco Wholesale Corporation,NASDAQ,common_stock,true
+BRK.B,Berkshire Hathaway Inc.,NYSE,common_stock,true
+JPM,JPMorgan Chase & Co.,NYSE,common_stock,true
+V,Visa Inc.,NYSE,common_stock,true
+MA,Mastercard Inc.,NYSE,common_stock,true
+UNH,UnitedHealth Group Inc.,NYSE,common_stock,true
+JNJ,Johnson & Johnson,NYSE,common_stock,true
+LLY,Eli Lilly and Co.,NYSE,common_stock,true
+XOM,Exxon Mobil Corporation,NYSE,common_stock,true
+PG,Procter & Gamble Co.,NYSE,common_stock,true
+HD,Home Depot Inc.,NYSE,common_stock,true
+WMT,Walmart Inc.,NYSE,common_stock,true

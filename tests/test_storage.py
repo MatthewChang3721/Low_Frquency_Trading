@@ -131,6 +131,119 @@ def test_atomic_publish_restores_previous_version_on_failure(
 
     restored = read_partitioned(live)
     assert len(restored) == 100  # the previous version survived the failed run
+    # the rollback also took the backup area it had created with it, so a failed
+    # run leaves no scaffolding behind (Task 2 keeps this a production guarantee,
+    # not something a test cleans up)
+    assert not (trash / "run2").exists()
+    assert not list(trash.rglob("*"))
+
+
+def test_atomic_publish_confirms_before_it_drops_the_backup(tmp_path: Path) -> None:
+    live = tmp_path / "live"
+    trash = tmp_path / "trash"
+
+    first = make_standardized_frame(periods=100)
+    stage1 = tmp_path / "stage1"
+    write_partitioned(first, stage1)
+    atomic_publish(stage1, live, trash, "run1")
+
+    second = make_standardized_frame(periods=400)
+    stage2 = tmp_path / "stage2"
+    write_partitioned(second, stage2)
+
+    observed: dict[str, object] = {}
+
+    def confirm() -> list[str]:
+        # the new data is live and the backup is *still* in place: deleting the
+        # backup is the commit step, and it only runs once this says "no issue"
+        observed["rows"] = len(read_partitioned(live))
+        observed["backup"] = (trash / "run2" / "symbol=AAPL").exists()
+        return []
+
+    atomic_publish(stage2, live, trash, "run2", confirm=confirm)
+
+    assert observed == {"rows": 400, "backup": True}
+    assert len(read_partitioned(live)) == 400
+    assert not (trash / "run2").exists()
+
+
+def test_atomic_publish_rolls_back_when_the_confirmation_reports_an_issue(
+    tmp_path: Path,
+) -> None:
+    live = tmp_path / "live"
+    trash = tmp_path / "trash"
+
+    original = make_standardized_frame(periods=100)
+    stage1 = tmp_path / "stage1"
+    write_partitioned(original, stage1)
+    atomic_publish(stage1, live, trash, "run1")
+
+    replacement = make_standardized_frame(periods=400)
+    stage2 = tmp_path / "stage2"
+    write_partitioned(replacement, stage2)
+
+    def confirm() -> list[str]:
+        return ["published row count mismatch"]
+
+    with pytest.raises(PublishError) as excinfo:
+        atomic_publish(stage2, live, trash, "run2", confirm=confirm)
+
+    assert "confirmation" in str(excinfo.value)
+    assert "published row count mismatch" in str(excinfo.value)
+    assert len(read_partitioned(live)) == 100  # the previous version is live again
+    assert not list(trash.rglob("*"))  # no backup, no empty scaffolding
+
+
+def test_atomic_publish_rolls_back_when_the_confirmation_raises(tmp_path: Path) -> None:
+    live = tmp_path / "live"
+    trash = tmp_path / "trash"
+
+    original = make_standardized_frame(periods=100)
+    stage1 = tmp_path / "stage1"
+    write_partitioned(original, stage1)
+    atomic_publish(stage1, live, trash, "run1")
+
+    replacement = make_standardized_frame(periods=400)
+    stage2 = tmp_path / "stage2"
+    write_partitioned(replacement, stage2)
+
+    def confirm() -> list[str]:
+        raise RuntimeError("the reader exploded")
+
+    with pytest.raises(PublishError) as excinfo:
+        atomic_publish(stage2, live, trash, "run2", confirm=confirm)
+
+    assert "the reader exploded" in str(excinfo.value)
+    assert len(read_partitioned(live)) == 100
+    assert not list(trash.rglob("*"))
+
+
+def test_atomic_publish_rolls_back_a_first_publish_without_a_backup(
+    tmp_path: Path,
+) -> None:
+    """With nothing to back up, the rollback removes what the transaction added.
+
+    The first publish of a symbol journals a swap whose backup is ``None``; if the
+    confirmation then fails there is no previous version to restore, so "rolled
+    back" can only mean "the partition this run swapped in is gone again".
+    """
+    live = tmp_path / "live"
+    trash = tmp_path / "trash"
+
+    frame = make_standardized_frame(periods=100)
+    stage = tmp_path / "stage"
+    write_partitioned(frame, stage)
+
+    def confirm() -> list[str]:
+        return ["published row count mismatch"]
+
+    with pytest.raises(PublishError):
+        atomic_publish(stage, live, trash, "run1", confirm=confirm)
+
+    assert partition_dirs(live) == []  # the symbol partition did not survive
+    assert read_partitioned(live).empty
+    assert partition_dirs(stage) == []  # and staging holds no half-swapped copy
+    assert not trash.exists()  # no backup was needed, so none may be left behind
 
 
 def test_atomic_publish_without_staged_partitions_raises(tmp_path: Path) -> None:

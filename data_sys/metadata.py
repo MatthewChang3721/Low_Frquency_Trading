@@ -73,27 +73,58 @@ class RunMetadata:
     failure_reasons: list[str] = field(default_factory=list)
     package_versions: dict[str, Any] = field(default_factory=dict)
 
+    # -- incremental-update bookkeeping --------------------------------------
+    #: Rows in the published dataset *before* this run.
+    existing_row_count: int = 0
+    #: Rows downloaded (and standardized) during this run.
+    downloaded_row_count: int = 0
+    #: Rows in the published dataset *after* the run (unchanged on failure).
+    published_row_count: int = 0
+    #: Downloaded sessions that did not exist locally before.
+    new_dates_count: int = 0
+    #: Downloaded sessions that overwrote an existing published row.
+    replaced_dates_count: int = 0
+    #: Local gaps the plan set out to fill, as ``[[start, end], ...]``.
+    missing_ranges: list[list[str]] = field(default_factory=list)
+    #: Overlap-refresh window, as ``[start, end]``, or ``None``.
+    refresh_range: list[str] | None = None
+    #: Every raw file written by this run (one per download window).
+    raw_paths: list[str] = field(default_factory=list)
+    #: The full :meth:`data_sys.planner.UpdatePlan.as_metadata` payload.
+    plan: dict[str, Any] = field(default_factory=dict)
+    #: Human-readable remarks (clamped request, disabled refresh, ...).
+    notes: list[str] = field(default_factory=list)
+    #: Set when this run was part of a universe batch.
+    batch_run_id: str | None = None
+    #: ``True`` only when the staged dataset replaced the published partition.
+    published: bool = False
+
     def to_dict(self) -> dict[str, Any]:
         return jsonable(asdict(self))
 
 
-def write_metadata(meta: RunMetadata, out_dir: Path | str) -> Path:
-    """Write ``meta`` as ``run_<run_id>.json`` under ``out_dir``."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    path = out_dir / f"run_{meta.run_id}.json"
+def write_json_file(payload: Any, path: Path | str) -> Path:
+    """Write ``payload`` as indented JSON, creating parent directories."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(meta.to_dict(), indent=2, ensure_ascii=False),
+        json.dumps(jsonable(payload), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     return path
+
+
+def write_metadata(meta: RunMetadata, out_dir: Path | str) -> Path:
+    """Write ``meta`` as ``run_<run_id>.json`` under ``out_dir``."""
+    return write_json_file(meta.to_dict(), Path(out_dir) / f"run_{meta.run_id}.json")
 
 
 __all__ = [
     "RunMetadata",
     "configure_logging",
     "collect_package_versions",
+    "write_json_file",
     "write_metadata",
     "TRACKED_PACKAGES",
 ]

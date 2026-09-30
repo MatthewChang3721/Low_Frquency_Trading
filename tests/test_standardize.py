@@ -8,7 +8,7 @@ import pytest
 
 from data_sys.errors import StandardizationError
 from data_sys.schema import STANDARD_COLUMNS
-from data_sys.standardize import standardize_bars
+from data_sys.standardize import derive_features, standardize_bars
 from tests.helpers import make_raw_frame
 
 
@@ -35,16 +35,57 @@ def test_row_count_and_ordering_are_preserved(raw_frame: pd.DataFrame) -> None:
 def test_derived_features(raw_frame: pd.DataFrame) -> None:
     out = standardize_bars(raw_frame, "AAPL")
 
+    # `daily_return` is the *adjusted-close* return: unadjusted OHLC is the real
+    # traded price, `adjusted_close` is the series that removes split/dividend
+    # jumps, so only its returns are comparable across a corporate action.
     assert pd.isna(out["daily_return"].iloc[0])
     assert out["daily_return"].iloc[1:].notna().all()
 
-    expected_return = out["close"].iloc[1] / out["close"].iloc[0] - 1.0
+    expected_return = out["adjusted_close"].iloc[1] / out["adjusted_close"].iloc[0] - 1.0
     assert out["daily_return"].iloc[1] == pytest.approx(expected_return)
 
     assert np.allclose(
         out["dollar_volume"].to_numpy(),
         (out["close"] * out["volume"]).to_numpy(),
     )
+
+
+def test_daily_return_is_not_the_unadjusted_return(raw_frame: pd.DataFrame) -> None:
+    out = standardize_bars(raw_frame, "AAPL")
+
+    unadjusted = out["close"].pct_change()
+
+    assert not np.allclose(out["daily_return"].iloc[1:], unadjusted.iloc[1:])
+
+
+def test_first_row_return_is_null_and_the_rest_are_not() -> None:
+    """The schema rule that bounds the whole column, checked directly."""
+    out = standardize_bars(make_raw_frame(periods=60), "AAPL")
+
+    assert len(out) == 60
+    assert out["daily_return"].isna().sum() == 1
+    assert pd.isna(out["daily_return"].iloc[0])
+    assert out["daily_return"].iloc[1:].notna().all()
+
+
+def test_single_row_history_only_has_a_null_return() -> None:
+    out = standardize_bars(make_raw_frame(periods=1), "AAPL")
+
+    assert len(out) == 1
+    assert pd.isna(out["daily_return"].iloc[0])
+
+
+def test_derive_features_is_idempotent_and_does_not_mutate(
+    standardized_frame: pd.DataFrame,
+) -> None:
+    before = standardized_frame.copy(deep=True)
+
+    result = derive_features(standardized_frame)
+
+    pd.testing.assert_frame_equal(standardized_frame, before)
+    assert result is not standardized_frame
+    pd.testing.assert_series_equal(result["daily_return"], standardized_frame["daily_return"])
+    pd.testing.assert_series_equal(result["dollar_volume"], standardized_frame["dollar_volume"])
 
 
 def test_adjusted_close_is_kept_separately(raw_frame: pd.DataFrame) -> None:

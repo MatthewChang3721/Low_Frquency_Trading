@@ -112,7 +112,7 @@ config/universe_seed.csv                # 20 只美股大型高流动性普通�
 
 | 字段 | 规则 |
 | --- | --- |
-| `symbol` | 股票代码。必须非空、大写、**唯一**，且匹配 `data_sys.schema.SYMBOL_PATTERN`（`^[A-Z0-9.\-]+$`，因此 `BRK.B` 这类含点号的多类别代码合法），长度 ≤ 10 |
+| `symbol` | 股票代码。必须非空、大写、**唯一**，且匹配 `data_sys.schema.SYMBOL_PATTERN`（`^[A-Z0-9.\-]+$`，因此 `BRK.B` 这类含点号的多类别代码合法），长度 ≤ 10。Yahoo 侧含点号的代码写作连字符（`BRK.B` 在供应商那里是 `BRK-B`），provider 会自动回退到该拼写，磁盘上仍是 `BRK.B`（见 §9） |
 | `name` | 证券名称，非空 |
 | `exchange` | 上市交易所，须属于 `ALLOWED_EXCHANGES`：`NASDAQ` / `NYSE` / `NYSE AMERICAN` / `NYSE ARCA` / `BATS` / `OTC` |
 | `security_type` | 第一版**仅允许** `common_stock` |
@@ -299,6 +299,7 @@ invalid universe configuration in 'config/universe_seed.csv'
 {
   "provider": "yahoo_finance",
   "symbol": "AAPL",
+  "vendor_symbol": "AAPL",
   "requested_start": "2024-01-02",
   "requested_end": "2024-03-29",
   "fetched_at_utc": "2026-09-27T22:35:31+00:00",
@@ -307,7 +308,7 @@ invalid universe configuration in 'config/universe_seed.csv'
 }
 ```
 
-> 两层元数据缺一不可：sidecar 证明「供应商当时给了什么」，`run_*.json` 说明「我们把什么发布到了哪里」。当 Yahoo 事后回溯调整历史价格时，二者的差异正是唯一可追溯的证据。
+> 两层元数据缺一不可：sidecar 证明「供应商当时给了什么」，`run_*.json` 说明「我们把什么发布到了哪里」。当 Yahoo 事后回溯调整历史价格时，二者的差异正是唯一可追溯的证据。sidecar 里的 `vendor_symbol` 是**供应商那边真正命中**的拼写（项目规范拼写与供应商拼写不同时，如 `BRK.B` ↔ `BRK-B`），`symbol` 则始终是项目规范拼写。
 
 ---
 
@@ -323,7 +324,7 @@ invalid universe configuration in 'config/universe_seed.csv'
 | `data_sys/planner.py` | 增量更新的下载计划：由「已发布会话 + 请求区间 + 重叠刷新宽度」决定**要下载哪些窗口、以及原因**；纯计算，无 I/O |
 | `data_sys/merge.py` | 把新下载的行并入已发布历史：`(symbol, date)` 去重时新行胜出，之后整段重算 `daily_return` / `dollar_volume` |
 | `data_sys/providers/base.py` | `DataProvider` 抽象基类（稳定接口，后续接 SEC / 付费数据商只加实现） |
-| `data_sys/providers/yahoo.py` | Yahoo Finance 实现，含 `tenacity` 重试 |
+| `data_sys/providers/yahoo.py` | Yahoo Finance 实现，含 `tenacity` 重试；**仅限请求**的代码拼写回退（`BRK.B` → `BRK-B`，先试规范拼写，落盘/元数据仍是 `BRK.B`） |
 | `data_sys/standardize.py` | 原始 DataFrame → 标准 schema，列名映射、类型转换、派生列（`daily_return` / `dollar_volume` 的唯一实现） |
 | `data_sys/schema.py` | `STANDARD_COLUMNS` 与 pandera `DataFrameSchema`（唯一真源） |
 | `data_sys/quality.py` | 质量检查与 `Failure` 收集，给出可定位的失败描述 |
@@ -340,7 +341,7 @@ invalid universe configuration in 'config/universe_seed.csv'
 ## 8. 测试
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest            # 全部 256 项
+.\.venv\Scripts\python.exe -m pytest            # 全部 261 项
 .\.venv\Scripts\python.exe -m pytest -v         # 逐项
 .\.venv\Scripts\python.exe -m ruff check .      # 静态检查
 ```
@@ -355,7 +356,7 @@ invalid universe configuration in 'config/universe_seed.csv'
 - `test_planner.py` / `test_market_calendar.py` / `test_merge.py` — 下载窗口的判定（首次回填 / 头部 / 内部缺口 / 尾部 / 重叠刷新 / 无会话）、NYSE 会话边界（跨周末与假日的「相邻」判定、区间裁剪、最近 N 个会话）、合并语义（同日新行胜出、派生列整段重算、边界行不残留旧 `daily_return`）；
 - `test_summary.py` — 正式数据的 `(symbol, year)` 汇总（字段与排序、JSON 安全、就地替换 10 次后仍可读；与 DuckDB 汇总只在一个**新建**数据集上对照），以及**架构守卫**：`summary` 与 `batch_query` 的源码里绝不出现 `import duckdb`；
 - `test_pipeline.py` — 编排成功路径与失败路径的退出码、元数据落盘、暂存区清理；
-- `test_standardize.py` / `test_quality.py` / `test_yahoo.py` — 字段映射、质量规则、provider 重试与错误包装。
+- `test_standardize.py` / `test_quality.py` / `test_yahoo.py` — 字段映射、质量规则、provider 重试与错误包装，以及**代码拼写回退**（`BRK.B` 先试规范拼写、失败后改试 `BRK-B`；交易所后缀 `RY.TO` 不会被改写；全部失败时报错会列出试过的每个拼写）。
 
 ## 9. 已知限制与后续
 
@@ -374,3 +375,4 @@ invalid universe configuration in 'config/universe_seed.csv'
 - 正式数据在更新进程中**只用 PyArrow 读取**：DuckDB 会在进程内按路径缓存文件句柄，而重建 view 不会清空该缓存；读取刚被替换过的同一路径会原生崩溃（Windows 上表现为 `access violation`，共享连接时表现为卡死），因此 DuckDB 只用于唯一 `.staging/<run_id>/` 目录的核验。**正式 Parquet 的 DuckDB 查询应在独立、未执行发布替换的新进程中进行**（详见 §2.1）。
 - Yahoo Finance 的数据许可限制见设计文档 §7.4：**在把数据再分发给协作者之前必须复核条款**，必要时改用有明确再分发许可的数据源。
 - 标准化层不做交易日补齐（缺失交易日不会生成空行），因此 `date` 的严格递增校验是「单调」而非「连续」。
+- 含点号的代码在 Yahoo 那边写作连字符（`BRK.B` → `BRK-B`）：provider **先按项目规范拼写请求**，只在返回空行或缺必需列时才回退到连字符拼写——规范拼写永远优先，`RY.TO` 这类交易所后缀不会被误改。代价是 `BRK.B` 每次更新会多出一次试探性请求（日志会写明 `resolved to the vendor ticker`）。文件名、标准化数据、Hive 分区与运行元数据里始终是 `BRK.B`，只有 sidecar 的 `vendor_symbol` 记录回退后的拼写。

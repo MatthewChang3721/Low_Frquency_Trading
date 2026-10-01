@@ -810,6 +810,22 @@ def test_the_symbol_is_normalized_before_download(tmp_path: Path) -> None:
     assert _live_dir(tmp_path, "AAPL").exists()
 
 
+def test_a_dotted_symbol_stays_canonical_outside_the_provider(tmp_path: Path) -> None:
+    """The vendor spelling is the provider's business: ``BRK.B`` travels here."""
+    provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
+
+    result = update_symbol(
+        symbol="brk.b", start="2024-01-02", end="2024-03-29",
+        data_root=tmp_path, provider=provider,
+    )
+
+    assert result.symbol == "BRK.B"
+    assert provider.calls[0][0] == "BRK.B"
+    assert _live_dir(tmp_path, "BRK.B").exists()
+    assert (tmp_path / "raw" / "market_bars" / "BRK.B").is_dir()
+    assert Path(result.raw_paths[0]).name.startswith("BRK.B_2024-01-02_2024-03-29_")
+
+
 def test_build_config_rejects_an_inverted_range() -> None:
     with pytest.raises(DataPipelineError):
         build_config("AAPL", "2024-06-03", "2024-01-02", None)

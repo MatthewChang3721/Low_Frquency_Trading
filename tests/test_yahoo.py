@@ -42,6 +42,7 @@ def test_download_arguments_and_metadata(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert result.meta["provider"] == "yahoo_finance"
     assert result.meta["symbol"] == "AAPL"
+    assert result.meta["vendor_symbol"] == "AAPL"  # nothing was rewritten
     assert result.meta["raw_rows"] == 5
     assert list(result.frame.columns) == [
         "Adj Close",
@@ -85,6 +86,92 @@ def test_missing_columns_raise(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(DownloadError):
         YahooFinanceProvider(wait_seconds=0.0).fetch_bars("AAPL", START, END)
+
+
+def test_a_dotted_symbol_falls_back_to_the_vendor_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``BRK.B`` is canonical here; Yahoo only answers to ``BRK-B``."""
+    frame = make_raw_frame(periods=3)
+    seen: list[str] = []
+
+    def fake_download(tickers, **kwargs):
+        seen.append(tickers)
+        return pd.DataFrame() if tickers == "BRK.B" else frame
+
+    monkeypatch.setattr(yahoo.yf, "download", fake_download)
+
+    result = YahooFinanceProvider(max_attempts=1, wait_seconds=0.0).fetch_bars(
+        "brk.b", START, END
+    )
+
+    assert seen == ["BRK.B", "BRK-B"]
+    assert result.meta["symbol"] == "BRK.B"         # the canonical spelling survives
+    assert result.meta["vendor_symbol"] == "BRK-B"  # ...this is what answered
+    assert len(result.frame) == 3
+
+
+def test_the_canonical_spelling_is_never_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exchange suffix (``RY.TO``) is fetched as-is: no guessing, no shadowing."""
+    frame = make_raw_frame(periods=3)
+    seen: list[str] = []
+
+    def fake_download(tickers, **kwargs):
+        seen.append(tickers)
+        return frame
+
+    monkeypatch.setattr(yahoo.yf, "download", fake_download)
+
+    result = YahooFinanceProvider(max_attempts=1, wait_seconds=0.0).fetch_bars(
+        "RY.TO", START, END
+    )
+
+    assert seen == ["RY.TO"]
+    assert result.meta["vendor_symbol"] == "RY.TO"
+
+
+def test_a_response_without_the_required_columns_also_triggers_the_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    incomplete = make_raw_frame(periods=3).drop(columns=["Adj Close"])
+    complete = make_raw_frame(periods=3)
+
+    def fake_download(tickers, **kwargs):
+        return incomplete if tickers == "BRK.B" else complete
+
+    monkeypatch.setattr(yahoo.yf, "download", fake_download)
+
+    result = YahooFinanceProvider(max_attempts=1, wait_seconds=0.0).fetch_bars(
+        "BRK.B", START, END
+    )
+
+    assert result.meta["vendor_symbol"] == "BRK-B"
+    assert "Adj Close" in result.frame.columns
+
+
+def test_every_spelling_tried_is_reported_when_none_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def empty_download(tickers, **kwargs):
+        seen.append(tickers)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(yahoo.yf, "download", empty_download)
+
+    with pytest.raises(DownloadError) as excinfo:
+        YahooFinanceProvider(max_attempts=1, wait_seconds=0.0).fetch_bars(
+            "BRK.B", START, END
+        )
+
+    assert seen == ["BRK.B", "BRK-B"]
+    message = str(excinfo.value)
+    assert "BRK.B" in message
+    assert "BRK-B" in message
+    assert "no rows" in message
 
 
 def test_transient_failure_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:

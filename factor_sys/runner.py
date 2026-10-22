@@ -9,11 +9,13 @@ replaceable parts meet::
     MarketDataReader.read_history(...)         -> long bars frame
     FactorContext(as_of_date, universe, bars)  -> the point-in-time slice
     Factor.compute(context)                    -> FactorPanel
+    FactorQualityChecker.inspect(panel)        -> FactorQualityReport | None
 
 :class:`FactorRunner` walks those steps in a fixed order, works out how far back
-the read has to start, and then checks that the panel it got back really belongs
-to the run it was asked for.  It is deliberately thin: it never rewrites a
-value, never fills a gap, never decides eligibility and never opens a file.
+the read has to start, checks that the panel it got back really belongs to the
+run it was asked for, and only then asks a checker how usable that panel is.  It
+is deliberately thin: it never rewrites a value, never fills a gap, never decides
+eligibility, never judges quality itself and never opens a file.
 
 Why the runner exists at all
 ----------------------------
@@ -47,6 +49,22 @@ sessions of history, or with nothing at all for the window.  The runner hands
 that on untouched: warm-up, missing-data policy and eligibility stay in the
 formula, where the same rule is applied to every symbol.
 
+The last step: a quality report
+-------------------------------
+A validated panel is not automatically a usable cross-section: half the universe
+may be missing a year of history.  That is a *soft* problem, so the runner asks a
+:class:`~factor_sys.quality.FactorQualityChecker` -- the default one unless
+another is injected -- to inspect the panel, and hands back both objects::
+
+    result = runner.run(Momentum12_1(), "2024-12-31")
+    result.panel            # the validated FactorPanel
+    result.quality_report   # a FactorQualityReport, or None when nothing is wrong
+
+The checker runs only after every hard check has passed, so a broken read, an
+invalid context or a panel from another run never reaches it.  A quality warning
+or error is never raised as an exception here: whether "only 40 of 50 symbols"
+is acceptable belongs to the strategy, the CLI and the backtest.
+
 Failed runs
 -----------
 Errors stay as specific as the layer that raised them.  A broken read stays a
@@ -54,12 +72,14 @@ Errors stay as specific as the layer that raised them.  A broken read stays a
 by :class:`~factor_sys.contracts.FactorContext` or by a factor's own frame stays
 a :class:`~factor_sys.errors.FactorContractError`.  Only orchestration failures
 -- a dependency that does not implement its interface, a decision date that is
-not a session, an unrelated exception from ``compute``, or a panel that belongs
-to a different run -- become :class:`~factor_sys.errors.FactorRunError`.
+not a session, an unrelated exception from ``compute``, a panel that belongs to
+a different run, or a checker that answers with something other than a report
+about this panel -- become :class:`~factor_sys.errors.FactorRunError`.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -80,6 +100,11 @@ from factor_sys.contracts import (
 )
 from factor_sys.errors import FactorContractError, FactorError, FactorRunError
 from factor_sys.market_data import MarketDataReader
+from factor_sys.quality import (
+    DefaultFactorQualityChecker,
+    FactorQualityChecker,
+    FactorQualityReport,
+)
 from factor_sys.universe import UniverseProvider, UniverseSnapshot
 
 
@@ -95,6 +120,94 @@ def _calendar_named(calendar_name: Any) -> tuple[str, Any]:
         return name, get_calendar(name)
     except CalendarError as exc:
         raise FactorRunError(f"could not load the trading calendar {name!r}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# FactorRunResult
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class FactorRunResult:
+    """What one run produced: the panel, and what the quality check saw.
+
+    ``run`` always answers with this one shape -- never a bare panel on a good
+    day and a report on a bad one -- so calling code is the same in both cases::
+
+        result = runner.run(Momentum12_1(), "2024-12-31")
+        result.panel             # the validated FactorPanel, unchanged
+        result.quality_report    # None, or a FactorQualityReport about that panel
+
+    Parameters
+    ----------
+    panel:
+        The object ``factor.compute`` returned, already validated against the
+        run's date, universe, name and version.  It stays a
+        :class:`~factor_sys.contracts.FactorPanel`, whose ``frame`` property
+        hands out a copy: this result never exposes a mutable frame of its own.
+    quality_report:
+        ``None`` when the checker found nothing, otherwise a report whose
+        identity (date, name, version, universe size) and non-empty issue list
+        are checked here, so a forged or stale report can never be handed on.
+
+    Raises
+    ------
+    factor_sys.errors.FactorRunError
+        If ``panel`` is not a :class:`~factor_sys.contracts.FactorPanel`, if the
+        report is neither ``None`` nor a
+        :class:`~factor_sys.quality.FactorQualityReport`, or if the report does
+        not describe exactly this panel.
+    """
+
+    panel: FactorPanel
+    quality_report: FactorQualityReport | None = None
+
+    def __post_init__(self) -> None:
+        """Refuse a result whose two halves do not belong together."""
+        if not isinstance(self.panel, FactorPanel):
+            raise FactorRunError(
+                f"FactorRunResult.panel must be a FactorPanel, got "
+                f"{type(self.panel).__name__}: a run result carries the validated "
+                "cross-section, not a raw frame"
+            )
+
+        report = self.quality_report
+        if report is None:
+            return
+        if not isinstance(report, FactorQualityReport):
+            raise FactorRunError(
+                "FactorRunResult.quality_report must be a FactorQualityReport or None, got "
+                f"{type(report).__name__}: a quality check either finds something or nothing"
+            )
+
+        problems: list[str] = []
+        if report.as_of_date != self.panel.as_of_date:
+            problems.append(
+                f"as_of_date is {report.as_of_date.isoformat()}, expected "
+                f"{self.panel.as_of_date.isoformat()}"
+            )
+        if report.factor_name != self.panel.factor_name:
+            problems.append(
+                f"factor_name is {report.factor_name!r}, expected {self.panel.factor_name!r}"
+            )
+        if report.factor_version != self.panel.factor_version:
+            problems.append(
+                f"factor_version is {report.factor_version!r}, expected "
+                f"{self.panel.factor_version!r}"
+            )
+        if report.universe_size != len(self.panel.universe):
+            problems.append(
+                f"universe_size is {report.universe_size}, expected {len(self.panel.universe)}"
+            )
+        if not report.issues:
+            problems.append(
+                "issues is empty: a report exists only because something was found "
+                "(a clean panel must be reported as None)"
+            )
+
+        if problems:
+            raise FactorRunError(
+                "the quality report does not describe the panel this run returned",
+                problems,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +235,17 @@ class FactorRunner:
        and those bars, which is where the no-look-ahead guard runs again;
     7. ``factor.compute(context)`` produces the panel;
     8. the panel must be a :class:`~factor_sys.contracts.FactorPanel` dated and
-       populated exactly as this run asked.
+       populated exactly as this run asked;
+    9. the panel is handed to a
+       :class:`~factor_sys.quality.FactorQualityChecker`, whose answer travels
+       back with it.
 
-    The runner then returns that same panel object: it validates a panel, it
-    never rewrites one, so a factor's values, eligibility flags and row order
-    travel out exactly as they were produced.
+    The runner then returns a :class:`FactorRunResult` holding that *same* panel
+    object plus the checker's report (``None`` when the panel is clean): it
+    validates a panel, it never rewrites one, so a factor's values, eligibility
+    flags and row order travel out exactly as they were produced.  A quality
+    warning or error is reported, never raised -- the strategy, the CLI and the
+    backtest decide what an "only 40 of 50 symbols" panel is worth.
 
     Parameters
     ----------
@@ -141,12 +260,19 @@ class FactorRunner:
         Trading calendar that defines "a session" (``"XNYS"`` by default).  It is
         resolved once, when the runner is built, so a misspelled name fails
         immediately instead of at the first run.
+    quality_checker:
+        What decides whether a valid panel is a *usable* one
+        (:class:`~factor_sys.quality.DefaultFactorQualityChecker` when omitted).
+        It runs last, only on a panel that already passed every hard check, and
+        it may be replaced without the runner learning a single rule.
 
     Raises
     ------
     factor_sys.errors.FactorRunError
-        If either dependency does not implement its interface, or the calendar
-        name is blank or unknown.
+        If a dependency does not implement its interface, the quality checker is
+        neither ``None`` nor a
+        :class:`~factor_sys.quality.FactorQualityChecker`, or the calendar name
+        is blank or unknown.
 
     Notes
     -----
@@ -160,8 +286,9 @@ class FactorRunner:
     .. code-block:: python
 
         runner = FactorRunner(StaticUniverseProvider(), ParquetMarketDataReader())
-        panel = runner.run(Momentum12_1(), "2024-01-05")
-        panel.frame  # one validated row per symbol of that day's pool
+        result = runner.run(Momentum12_1(), "2024-01-05")
+        result.panel          # one validated row per symbol of that day's pool
+        result.quality_report  # None, or what the checker found
     """
 
     def __init__(
@@ -170,6 +297,7 @@ class FactorRunner:
         market_data_reader: MarketDataReader,
         *,
         calendar_name: str = DEFAULT_CALENDAR_NAME,
+        quality_checker: FactorQualityChecker | None = None,
     ) -> None:
         if not isinstance(universe_provider, UniverseProvider):
             raise FactorRunError(
@@ -183,6 +311,14 @@ class FactorRunner:
                 f"{type(market_data_reader).__name__}: the runner reads bars through "
                 "that interface only and never parses Parquet itself"
             )
+        if quality_checker is None:
+            quality_checker = DefaultFactorQualityChecker()
+        elif not isinstance(quality_checker, FactorQualityChecker):
+            raise FactorRunError(
+                "quality_checker must be a FactorQualityChecker, got "
+                f"{type(quality_checker).__name__}: the runner asks one object "
+                "inspect(panel) and never applies a quality rule itself"
+            )
 
         name, calendar = _calendar_named(calendar_name)
 
@@ -190,6 +326,7 @@ class FactorRunner:
         self._market_data_reader = market_data_reader
         self._calendar_name = name
         self._calendar = calendar
+        self._quality_checker = quality_checker
 
     @property
     def universe_provider(self) -> UniverseProvider:
@@ -211,16 +348,22 @@ class FactorRunner:
         """The resolved calendar object (an ``exchange_calendars`` calendar)."""
         return self._calendar
 
+    @property
+    def quality_checker(self) -> FactorQualityChecker:
+        """The checker every run asks about the panel it just produced."""
+        return self._quality_checker
+
     def __repr__(self) -> str:
         return (
             f"{type(self).__name__}(calendar_name={self._calendar_name!r}, "
             f"universe_provider={type(self._universe_provider).__name__}, "
-            f"market_data_reader={type(self._market_data_reader).__name__})"
+            f"market_data_reader={type(self._market_data_reader).__name__}, "
+            f"quality_checker={type(self._quality_checker).__name__})"
         )
 
     # -- the run -------------------------------------------------------------
-    def run(self, factor: Factor, as_of_date: date | str) -> FactorPanel:
-        """Compute ``factor`` for the session ``as_of_date``.
+    def run(self, factor: Factor, as_of_date: date | str) -> FactorRunResult:
+        """Compute ``factor`` for the session ``as_of_date`` and inspect the panel.
 
         Parameters
         ----------
@@ -235,17 +378,21 @@ class FactorRunner:
 
         Returns
         -------
-        FactorPanel
-            The object ``factor.compute`` returned, unchanged and already
-            validated against this run's date, universe, name and version.
+        FactorRunResult
+            ``.panel`` is the object ``factor.compute`` returned, unchanged and
+            already validated against this run's date, universe, name and
+            version; ``.quality_report`` is ``None`` when the checker found
+            nothing, or a report about that very panel (never an exception: a
+            soft problem is the caller's decision).
 
         Raises
         ------
         FactorRunError
             If the factor is not runnable, the provider answers with something
             that is not a snapshot for this date, the date is not a session, the
-            factor raises an unrelated exception, or the panel does not belong to
-            this run.
+            factor raises an unrelated exception, the panel does not belong to
+            this run, or the checker answers with something that is not a report
+            about that panel.
         MarketDataReadError
             Propagated unchanged from the reader: an impossible request or a
             dataset that cannot answer it is the reader's failure to report.
@@ -273,7 +420,10 @@ class FactorRunner:
 
         panel = _computed_panel(factor, context, spec)
         _require_this_run(panel, snapshot, spec)
-        return panel
+        return FactorRunResult(
+            panel=panel,
+            quality_report=_quality_report(self._quality_checker, panel),
+        )
 
     # -- steps that need the calendar ---------------------------------------
     def _require_session(self, as_of: date) -> None:
@@ -421,4 +571,36 @@ def _require_this_run(
         )
 
 
-__all__ = ["FactorRunner"]
+def _quality_report(
+    checker: FactorQualityChecker,
+    panel: FactorPanel,
+) -> FactorQualityReport | None:
+    """Ask ``checker`` about ``panel``: last step, and never a rule of our own.
+
+    Only reached after the panel has been accepted, so a hard failure can never
+    be mistaken for a quality finding.  The answer must be ``None`` or a report;
+    a report about another panel (or one with no issues) is refused later by
+    :class:`FactorRunResult`, which is the single place that owns that invariant.
+    """
+    try:
+        report = checker.inspect(panel)
+    except FactorError:
+        # Already precise: a FactorContractError from a custom checker, or any
+        # other factor-system error, is what the caller expects to catch.
+        raise
+    except Exception as exc:
+        raise FactorRunError(
+            f"{type(checker).__name__}.inspect() raised {type(exc).__name__} while "
+            f"checking {panel.factor_name!r} v{panel.factor_version} on "
+            f"{panel.as_of_date.isoformat()}: {exc}"
+        ) from exc
+
+    if report is None or isinstance(report, FactorQualityReport):
+        return report
+    raise FactorRunError(
+        f"{type(checker).__name__}.inspect() must return a FactorQualityReport or None, "
+        f"got {type(report).__name__}: a quality check either finds something or nothing"
+    )
+
+
+__all__ = ["FactorRunResult", "FactorRunner"]

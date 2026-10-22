@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -39,13 +40,18 @@ import factor_sys.runner as runner_module
 from data_sys.errors import CalendarError, DataPipelineError
 from data_sys.market_calendar import calendar_bounds, get_calendar, sessions_in_range
 from factor_sys import (
+    DefaultFactorQualityChecker,
     Factor,
     FactorContext,
     FactorContractError,
     FactorError,
     FactorPanel,
+    FactorQualityChecker,
+    FactorQualityIssue,
+    FactorQualityReport,
     FactorRunError,
     FactorRunner,
+    FactorRunResult,
     FactorSpec,
     MarketDataReader,
     MarketDataReadError,
@@ -356,14 +362,16 @@ def test_a_run_walks_the_pipeline_in_a_fixed_order(
     runner: FactorRunner,
     recorder: Recorder,
 ) -> None:
-    """Each step runs exactly once, in the documented order, and a panel comes back."""
-    panel = runner.run(RecordingFactor(recorder, lookback_sessions=2), AS_OF)
+    """Each step runs exactly once, in the documented order, and a result comes back."""
+    result = runner.run(RecordingFactor(recorder, lookback_sessions=2), AS_OF)
 
     assert recorder.names == ["snapshot", "read_history", "compute"]
     assert recorder.detail("snapshot") == AS_OF
-    assert isinstance(panel, FactorPanel)
-    assert panel.as_of_date == AS_OF
-    assert panel.universe == SYMBOLS
+    assert isinstance(result, FactorRunResult)
+    assert isinstance(result.panel, FactorPanel)
+    assert result.quality_report is None
+    assert result.panel.as_of_date == AS_OF
+    assert result.panel.universe == SYMBOLS
 
 
 def test_the_reader_gets_the_spec_fields_and_the_computed_window(
@@ -413,10 +421,10 @@ def test_the_panel_comes_back_untouched(runner: FactorRunner, recorder: Recorder
         returned.append(panel)
         return panel
 
-    panel = runner.run(RecordingFactor(recorder, respond=respond), AS_OF)
+    result = runner.run(RecordingFactor(recorder, respond=respond), AS_OF)
 
-    assert panel is returned[0]
-    rows = panel.frame
+    assert result.panel is returned[0]
+    rows = result.panel.frame
     assert rows["symbol"].tolist() == list(SYMBOLS)
     assert rows["raw_value"].iloc[0] == 0.25
     assert pd.isna(rows["raw_value"].iloc[1])
@@ -431,10 +439,10 @@ def test_the_decision_date_is_normalized_to_a_plain_date(
     value: date | str | datetime,
 ) -> None:
     """A date, an ISO string and a datetime all decide on the same session."""
-    panel = runner.run(RecordingFactor(recorder), value)
+    result = runner.run(RecordingFactor(recorder), value)
 
     assert recorder.detail("snapshot") == AS_OF
-    assert panel.as_of_date == AS_OF
+    assert result.panel.as_of_date == AS_OF
 
 
 def test_one_runner_serves_many_runs(runner: FactorRunner, recorder: Recorder) -> None:
@@ -446,8 +454,11 @@ def test_one_runner_serves_many_runs(runner: FactorRunner, recorder: Recorder) -
     )
 
     assert recorder.names == ["snapshot", "read_history", "compute"] * 2
-    assert (first.factor_name, second.factor_name) == ("momentum_12_1", "value_ep")
-    assert (first.as_of_date, second.as_of_date) == (AS_OF, date(2024, 1, 8))
+    assert (first.panel.factor_name, second.panel.factor_name) == (
+        "momentum_12_1",
+        "value_ep",
+    )
+    assert (first.panel.as_of_date, second.panel.as_of_date) == (AS_OF, date(2024, 1, 8))
 
 
 def test_the_runner_exposes_its_wiring(
@@ -460,9 +471,10 @@ def test_the_runner_exposes_its_wiring(
     assert runner.market_data_reader is reader
     assert runner.calendar_name == "XNYS"
     assert runner.calendar is get_calendar("XNYS")
+    assert isinstance(runner.quality_checker, DefaultFactorQualityChecker)
     assert repr(runner) == (
         "FactorRunner(calendar_name='XNYS', universe_provider=RecordingProvider, "
-        "market_data_reader=RecordingReader)"
+        "market_data_reader=RecordingReader, quality_checker=DefaultFactorQualityChecker)"
     )
 
 
@@ -474,7 +486,7 @@ def test_other_implementations_drop_in_unchanged(tmp_path: Path) -> None:
     path = write_universe_file(tmp_path / "universe.csv", POOL)
 
     runner = FactorRunner(StaticUniverseProvider(path), LiteralReader())
-    panel = runner.run(LiteralFactor(), AS_OF)
+    panel = runner.run(LiteralFactor(), AS_OF).panel
 
     assert panel.factor_name == "constant_one"
     assert panel.factor_version == "0.1.0"
@@ -489,6 +501,134 @@ def test_the_runner_is_bound_to_no_implementation(runner: FactorRunner) -> None:
     assert isinstance(runner.universe_provider, UniverseProvider)
     assert isinstance(runner.market_data_reader, MarketDataReader)
     assert [base.__name__ for base in type(runner).__mro__] == ["FactorRunner", "object"]
+
+
+# ---------------------------------------------------------------------------
+# The quality check: the runner's last step, reached through an interface
+# ---------------------------------------------------------------------------
+class RecordingChecker(FactorQualityChecker):
+    """A checker double: it records the panel it was asked about, then answers.
+
+    ``respond`` builds the answer from the panel (so a test can echo the panel's
+    own identity); ``answer`` is a literal answer and ``error`` is a failure to
+    propagate.
+    """
+
+    def __init__(
+        self,
+        recorder: Recorder,
+        *,
+        respond: Callable[[FactorPanel], object] | None = None,
+        answer: object = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.recorder = recorder
+        self.respond = respond
+        self.answer = answer
+        self.error = error
+
+    def inspect(self, panel: FactorPanel) -> FactorQualityReport | None:
+        self.recorder.record("inspect", panel)
+        if self.error is not None:
+            raise self.error
+        if self.respond is not None:
+            return self.respond(panel)  # type: ignore[return-value]
+        return self.answer  # type: ignore[return-value]
+
+
+def report_for(panel: FactorPanel, *, code: str = "custom_rule") -> FactorQualityReport:
+    """A report that describes exactly ``panel``."""
+    return FactorQualityReport(
+        as_of_date=panel.as_of_date,
+        factor_name=panel.factor_name,
+        factor_version=panel.factor_version,
+        universe_size=len(panel.universe),
+        eligible_count=len(panel.universe),
+        eligible_coverage=1.0,
+        issues=(
+            FactorQualityIssue(
+                code=code,
+                severity="error",
+                message="a custom rule fired",
+                affected_symbols=panel.symbols[:1],
+            ),
+        ),
+    )
+
+
+def test_a_custom_checker_runs_last_and_replaces_the_default(recorder: Recorder) -> None:
+    """The checker is asked once, after the panel exists, and its answer is used."""
+    checker = RecordingChecker(recorder, respond=report_for)
+    runner = FactorRunner(
+        RecordingProvider(recorder),
+        RecordingReader(recorder),
+        quality_checker=checker,
+    )
+
+    result = runner.run(RecordingFactor(recorder), AS_OF)
+
+    assert runner.quality_checker is checker
+    assert recorder.names == ["snapshot", "read_history", "compute", "inspect"]
+    assert recorder.detail("inspect") is result.panel
+    assert isinstance(result.quality_report, FactorQualityReport)
+    assert result.quality_report.issues[0].code == "custom_rule"
+    assert result.quality_report.as_of_date == result.panel.as_of_date
+
+
+def test_a_checker_that_finds_nothing_leaves_the_report_empty(recorder: Recorder) -> None:
+    """``None`` from the checker means ``quality_report is None`` on the result."""
+    checker = RecordingChecker(recorder, answer=None)
+    runner = FactorRunner(
+        RecordingProvider(recorder),
+        RecordingReader(recorder),
+        quality_checker=checker,
+    )
+
+    result = runner.run(RecordingFactor(recorder), AS_OF)
+
+    assert result.quality_report is None
+    assert recorder.names == ["snapshot", "read_history", "compute", "inspect"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [object(), "checker", 42, DefaultFactorQualityChecker, pd.DataFrame()],
+)
+def test_a_quality_checker_that_is_not_a_checker_is_refused(
+    reader: RecordingReader,
+    provider: RecordingProvider,
+    value: object,
+) -> None:
+    """Construction catches a wrong checker, exactly like the other dependencies."""
+    with pytest.raises(FactorRunError) as excinfo:
+        FactorRunner(provider, reader, quality_checker=value)  # type: ignore[arg-type]
+
+    assert "quality_checker must be a FactorQualityChecker" in str(excinfo.value)
+
+
+def test_a_run_result_is_frozen_and_holds_no_frame(
+    runner: FactorRunner, recorder: Recorder
+) -> None:
+    """The result is a frozen pair of objects; the panel is the only frame holder."""
+    result = runner.run(RecordingFactor(recorder), AS_OF)
+
+    with pytest.raises(FrozenInstanceError):
+        result.panel = None  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        result.quality_report = None  # type: ignore[misc]
+
+    assert isinstance(result, FactorRunResult)
+    assert isinstance(result.panel, FactorPanel)
+    assert "frame" not in vars(result)
+    assert not isinstance(getattr(result, "frame", None), pd.DataFrame)
+
+
+def test_a_run_result_refuses_something_that_is_not_a_panel() -> None:
+    """A raw frame (or anything else) cannot be dressed up as a run result."""
+    with pytest.raises(FactorRunError) as excinfo:
+        FactorRunResult(panel=pd.DataFrame())  # type: ignore[arg-type]
+
+    assert "must be a FactorPanel" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -600,11 +740,11 @@ def test_a_short_calendar_history_uses_its_first_session(recorder: Recorder) -> 
     early = sessions_in_range(CALENDAR, first, first + timedelta(days=14))[2]
     runner = FactorRunner(RecordingProvider(recorder), RecordingReader(recorder))
 
-    panel = runner.run(RecordingFactor(recorder, lookback_sessions=252), early)
+    result = runner.run(RecordingFactor(recorder, lookback_sessions=252), early)
 
     assert recorder.detail("read_history")["start_date"] == first
     assert recorder.names == ["snapshot", "read_history", "compute"]
-    assert panel.as_of_date == early
+    assert result.panel.as_of_date == early
 
 
 # ---------------------------------------------------------------------------
@@ -621,12 +761,14 @@ def test_a_short_history_still_reaches_the_factor(recorder: Recorder) -> None:
         values = [1.0 if ok else float("nan") for ok in eligible]
         return panel_for(context, SPEC, values=values, eligible=eligible)
 
-    panel = runner.run(RecordingFactor(recorder, lookback_sessions=21, respond=respond), AS_OF)
+    result = runner.run(RecordingFactor(recorder, lookback_sessions=21, respond=respond), AS_OF)
 
     assert recorder.detail("read_history")["start_date"] == nth_session_before(AS_OF, 21)
-    rows = panel.frame
+    rows = result.panel.frame
     assert rows["is_eligible"].tolist() == [False, False, False]
     assert rows["raw_value"].isna().all()
+    # Nothing was computed -- a quality error, reported, never raised.
+    assert [issue.code for issue in result.quality_report.issues] == ["zero_eligible_coverage"]
 
 
 def test_a_missing_symbol_is_neither_filled_nor_dropped(recorder: Recorder) -> None:
@@ -641,12 +783,15 @@ def test_a_missing_symbol_is_neither_filled_nor_dropped(recorder: Recorder) -> N
         eligible = [symbol in set(context.bars["symbol"]) for symbol in context.universe]
         return panel_for(context, SPEC, eligible=eligible)
 
-    panel = runner.run(RecordingFactor(recorder, respond=respond), AS_OF)
+    result = runner.run(RecordingFactor(recorder, respond=respond), AS_OF)
 
     assert seen[0].bars["symbol"].tolist() == ["AAPL", "MSFT"]
     assert len(seen[0].bars) == 2
-    assert panel.universe == SYMBOLS
-    assert panel.frame["is_eligible"].tolist() == [True, True, False]
+    assert result.panel.universe == SYMBOLS
+    assert result.panel.frame["is_eligible"].tolist() == [True, True, False]
+    # One symbol out of three: a partial-coverage warning travels with the panel.
+    assert [issue.code for issue in result.quality_report.issues] == ["partial_eligible_coverage"]
+    assert result.quality_report.issues[0].affected_symbols == ("NVDA",)
 
 
 def test_an_empty_frame_is_passed_through_to_the_factor(recorder: Recorder) -> None:
@@ -663,9 +808,9 @@ def test_an_empty_frame_is_passed_through_to_the_factor(recorder: Recorder) -> N
             eligible=[False] * len(context.universe),
         )
 
-    panel = runner.run(RecordingFactor(recorder, respond=respond), AS_OF)
+    result = runner.run(RecordingFactor(recorder, respond=respond), AS_OF)
 
-    rows = panel.frame
+    rows = result.panel.frame
     assert rows["symbol"].tolist() == list(SYMBOLS)
     assert not rows["is_eligible"].any()
     assert rows["raw_value"].isna().all()
@@ -1054,6 +1199,7 @@ def test_the_calendar_name_is_trimmed(provider: RecordingProvider, reader: Recor
 ALLOWED_IMPORTS: frozenset[str] = frozenset(
     {
         "__future__",
+        "dataclasses",
         "datetime",
         "typing",
         "data_sys.errors",
@@ -1061,6 +1207,7 @@ ALLOWED_IMPORTS: frozenset[str] = frozenset(
         "factor_sys.contracts",
         "factor_sys.errors",
         "factor_sys.market_data",
+        "factor_sys.quality",
         "factor_sys.universe",
     }
 )
@@ -1116,9 +1263,10 @@ def test_the_runner_never_opens_or_prints_anything() -> None:
 def test_the_runner_and_its_error_are_exported() -> None:
     """The package root is the one place to import them from."""
     assert factor_sys.FactorRunner is FactorRunner
+    assert factor_sys.FactorRunResult is FactorRunResult
     assert factor_sys.FactorRunError is FactorRunError
-    assert {"FactorRunner", "FactorRunError"} <= set(factor_sys.__all__)
-    assert runner_module.__all__ == ["FactorRunner"]
+    assert {"FactorRunner", "FactorRunResult", "FactorRunError"} <= set(factor_sys.__all__)
+    assert runner_module.__all__ == ["FactorRunResult", "FactorRunner"]
 
 
 def test_factor_run_error_is_a_factor_system_error_only() -> None:

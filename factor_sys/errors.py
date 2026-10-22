@@ -68,9 +68,13 @@ class FactorRunError(FactorError):
 
     Only *orchestration* failures are reported here: a dependency that does not
     implement its interface, a decision date that is not a trading session, a
-    factor that raises something unrelated to the factor system, or a panel that
-    does not belong to the run it was asked for.  Errors raised by the layers
-    underneath keep their own type -- a broken read stays a
+    factor that raises something unrelated to the factor system, a panel that
+    does not belong to the run it was asked for, or a quality checker that
+    answers with something other than a report about the panel it was given.  A
+    *quality* finding is never raised: it travels back inside
+    :class:`~factor_sys.quality.FactorQualityReport`, so the caller decides what
+    a partial cross-section is worth.  Errors raised by the layers underneath
+    keep their own type -- a broken read stays a
     :class:`MarketDataReadError`, a contract violation stays a
     :class:`FactorContractError` -- so a caller can tell "the data was not there"
     from "the formula was wrong" from "the run itself was impossible".
@@ -88,4 +92,73 @@ class FactorRunError(FactorError):
         super().__init__(_with_problems(message, self.problems))
 
 
-__all__ = ["FactorError", "FactorContractError", "MarketDataReadError", "FactorRunError"]
+class FactorStoreError(FactorError):
+    """Raised when factor-panel storage or retrieval fails.
+
+    The store speaks in one domain error for both directions: a ``write`` that
+    cannot be honoured (a caller that is not storing a
+    :class:`~factor_sys.contracts.FactorPanel`, an unusable root, a version that
+    cannot name a directory, a failed temporary write or replace) and a ``read``
+    that cannot be satisfied (an illegal key, no file for a legal key, a file
+    that is not Parquet, metadata that is missing, unknown or contradicts the
+    table, a table that no longer validates as a panel).  ``exists`` is the one
+    deliberate exception: a legal key with no file is ``False``, not an error.
+
+    Errors raised underneath keep their chain: a corrupt Parquet file or a
+    panel that fails :class:`~factor_sys.contracts.FactorPanel` validation is
+    reported with ``raise ... from exc``, so the original reason is never lost.
+    """
+
+
+class FactorRegistryError(FactorError):
+    """Raised when a factor cannot be registered or looked up.
+
+    A registry is a table of *names*, so everything that can go wrong with the
+    table lands here: a name that is not a string or not snake_case, a name that
+    is already taken, a name nobody registered, a factory that is not callable,
+    one that builds something other than a :class:`~factor_sys.contracts.Factor`,
+    or one that raises.
+
+    A factory that raises a :class:`FactorError` of its own is **not** wrapped:
+    the layer that knows what went wrong (an invalid ``FactorSpec``, for example)
+    already says it precisely, and a caller may branch on that type.  Any other
+    failure is reported here with the original exception as ``__cause__``, so the
+    traceback still shows where it came from.
+    """
+
+
+class QuickAnalysisError(FactorError):
+    """Raised when panels cannot be described as basic statistics.
+
+    Only the *shape of the request* fails here, never the data it carries: a
+    caller that hands the analyzer something which is not a
+    :class:`~factor_sys.contracts.FactorPanel`, asks for a history from a single
+    panel, mixes two factor names or versions, repeats an ``as_of_date``, or
+    builds a :class:`~factor_sys.quick_analysis.FactorPanelStatistics` whose
+    coverage, rate, deviation or finiteness contradicts its own counts.  A
+    panel where nothing could be computed is **not** an error: it is described
+    with ``valid_count == 0`` and ``None`` for the four moments, because "no
+    usable number today" is a result, not a broken request.
+
+    Attributes
+    ----------
+    problems:
+        Every reason the request was refused, collected the way
+        :class:`FactorContractError` collects them, so one failed call names all
+        the offending panels at once instead of only the first.
+    """
+
+    def __init__(self, message: str, problems: Sequence[str] | None = None) -> None:
+        self.problems: list[str] = list(problems) if problems else []
+        super().__init__(_with_problems(message, self.problems))
+
+
+__all__ = [
+    "FactorError",
+    "FactorContractError",
+    "MarketDataReadError",
+    "FactorRunError",
+    "FactorRegistryError",
+    "FactorStoreError",
+    "QuickAnalysisError",
+]

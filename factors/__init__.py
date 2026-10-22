@@ -6,8 +6,8 @@ What belongs here
 
     data_sys      market bars, the universe and the trading calendar
         |
-    factor_sys    the contract, the market-data reader, the runner, and later
-        |         transforms, storage and analytics
+    factor_sys    the contract, the market-data reader, the runner, the name
+        |         registry and the panel store; then transforms and analytics
     factors/      formulas only: ``adjusted_close(t-21) / adjusted_close(t-252) - 1``
 
 A module in this package may import :mod:`factor_sys.contracts` (to subclass
@@ -24,9 +24,15 @@ The factors
     twelve-month price momentum that skips the most recent month
     (``momentum_12_1``, version ``1.0.0``, lookback 252 sessions)
 
-Not implemented yet, on purpose: factor storage, cross-sectional transforms
-(``rank``/``zscore``), multi-factor composition, IC analysis, strategies,
-portfolio construction and backtesting.
+Every factor here is reachable by name through
+:func:`factor_sys.registry.default_factor_registry`: a new module becomes
+available to callers that only know a name once it is registered there
+explicitly.  The runner never imports a factor, so nothing else has to change.
+
+Not implemented yet, on purpose: cross-sectional transforms (``rank``/``zscore``),
+``QuickAnalysis``, multi-factor composition, IC analysis, strategies, portfolio
+construction and backtesting.  Storing a panel is no longer on that list: a
+validated panel already goes to :class:`factor_sys.factor_store.ParquetFactorStore`.
 
 Examples
 --------

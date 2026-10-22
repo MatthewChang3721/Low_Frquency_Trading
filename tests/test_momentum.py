@@ -28,8 +28,10 @@ Covered in this order:
   change the answer, and repeated runs are identical,
 * the contract error for a reader that forgot ``required_fields``,
 * the runner integration: the reader is asked for ``("adjusted_close",)``, the
-  window really is 253 XNYS sessions ending on the decision date, and the panel
-  that comes back is the one the factor computed,
+  window really is 253 XNYS sessions ending on the decision date, the panel that
+  comes back is the one the factor computed, and the quality report the runner
+  attaches says exactly what the window could not deliver (no report when every
+  symbol was computable, a partial-coverage warning when one was not),
 * the architectural boundary of the module and its exports.
 """
 
@@ -771,7 +773,8 @@ def test_the_runner_asks_for_adjusted_close_over_a_253_session_window() -> None:
     reader = WindowMarketDataReader(CALENDAR, prices, short={"MSFT": 100})
     runner = FactorRunner(provider, reader)
 
-    panel = runner.run(Momentum12_1(), AS_OF.isoformat())
+    result = runner.run(Momentum12_1(), AS_OF.isoformat())
+    panel = result.panel
 
     # -- what the runner asked for -----------------------------------------
     assert provider.asked == [AS_OF]
@@ -799,6 +802,17 @@ def test_the_runner_asks_for_adjusted_close_over_a_253_session_window() -> None:
     assert values(panel)["AAPL"] == pytest.approx(0.30)
     assert math.isnan(values(panel)["MSFT"])
     assert math.isnan(values(panel)["NVDA"])
+    # -- two symbols with short or missing history are a reported warning ----
+    assert result.quality_report is not None
+    assert [issue.code for issue in result.quality_report.issues] == [
+        "partial_eligible_coverage"
+    ]
+    coverage_issue = result.quality_report.issues[0]
+    assert coverage_issue.severity == "warning"
+    assert coverage_issue.affected_symbols == ("MSFT", "NVDA")
+    assert result.quality_report.universe_size == 3
+    assert result.quality_report.eligible_count == 1
+    assert result.quality_report.eligible_coverage == pytest.approx(1 / 3)
 
 
 def test_the_runner_returns_exactly_what_the_factor_computed() -> None:
@@ -811,7 +825,8 @@ def test_the_runner_returns_exactly_what_the_factor_computed() -> None:
     reader = WindowMarketDataReader(CALENDAR, prices)
     runner = FactorRunner(provider, reader)
 
-    panel = runner.run(Momentum12_1(), AS_OF)
+    result = runner.run(Momentum12_1(), AS_OF)
+    panel = result.panel
 
     bars = reader.answers[0]
     assert list(bars.columns) == ["date", "symbol", "adjusted_close"]
@@ -826,6 +841,11 @@ def test_the_runner_returns_exactly_what_the_factor_computed() -> None:
     assert computed["MSFT"] == pytest.approx(-0.25)
     assert math.isnan(computed["NVDA"])
 
+    # -- the missing symbol is reported, and the panel is still returned -----
+    assert result.quality_report is not None
+    assert result.quality_report.issues[0].affected_symbols == ("NVDA",)
+    assert result.quality_report.eligible_coverage == pytest.approx(2 / 3)
+
 
 def test_a_gap_in_the_read_window_makes_only_that_symbol_ineligible() -> None:
     """252 rows in the requested window is not a year: the gap is never filled."""
@@ -837,12 +857,37 @@ def test_a_gap_in_the_read_window_makes_only_that_symbol_ineligible() -> None:
     reader = WindowMarketDataReader(CALENDAR, prices, gaps={"AAPL": (100,)})
     runner = FactorRunner(provider, reader)
 
-    panel = runner.run(Momentum12_1(), AS_OF)
+    result = runner.run(Momentum12_1(), AS_OF)
+    panel = result.panel
 
     assert len(reader.answers[0]) == 2 * REQUIRED_OBSERVATIONS - 1
     assert eligibility(panel) == {"AAPL": False, "MSFT": True}
     assert math.isnan(values(panel)["AAPL"])
     assert values(panel)["MSFT"] == 0.0
+
+    assert result.quality_report is not None
+    assert [issue.code for issue in result.quality_report.issues] == [
+        "partial_eligible_coverage"
+    ]
+    assert result.quality_report.issues[0].affected_symbols == ("AAPL",)
+
+
+def test_a_complete_run_reports_no_quality_problem() -> None:
+    """Every symbol computable with finite values: the result carries no report."""
+    prices = {
+        "AAPL": momentum_prices(start=100.0, end=130.0),
+        "MSFT": momentum_prices(start=80.0, end=60.0),
+    }
+    provider = MemoryUniverseProvider(("AAPL", "MSFT"))
+    reader = WindowMarketDataReader(CALENDAR, prices)
+    runner = FactorRunner(provider, reader)
+
+    result = runner.run(Momentum12_1(), AS_OF)
+
+    assert result.panel.symbols == ("AAPL", "MSFT")
+    assert eligibility(result.panel) == {"AAPL": True, "MSFT": True}
+    assert result.quality_report is None
+    assert values(result.panel)["AAPL"] == pytest.approx(0.30)
 
 
 # ---------------------------------------------------------------------------

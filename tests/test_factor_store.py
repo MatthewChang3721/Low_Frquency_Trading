@@ -180,6 +180,9 @@ def test_a_minimal_store_can_replace_the_parquet_one() -> None:
             day = as_of_date if isinstance(as_of_date, date) else date.fromisoformat(as_of_date)
             return (factor_name, factor_version, day) in self.panels
 
+        def path_for(self, factor_name: str, factor_version: str, as_of_date: date | str) -> Path:
+            return Path(f"memory://{factor_name}/{factor_version}/{as_of_date}")
+
         def read_range(
             self,
             factor_name: str,
@@ -200,6 +203,7 @@ def test_a_minimal_store_can_replace_the_parquet_one() -> None:
     panel = make_panel()
     assert store.write(panel) == Path("memory://panel")
     assert store.exists(NAME, VERSION, "2024-12-31") is True
+    assert store.path_for(NAME, VERSION, AS_OF) == Path(f"memory://{NAME}/{VERSION}/{AS_OF}")
     assert store.read(NAME, VERSION, AS_OF).universe == SYMBOLS
     assert store.read_range(NAME, VERSION, "2024-12-01", "2024-12-31") == (panel,)
 
@@ -494,6 +498,148 @@ def test_exists_does_not_read_the_file(store: ParquetFactorStore) -> None:
     path = store.write(make_panel())
     path.write_bytes(b"not parquet")
     assert store.exists(NAME, VERSION, AS_OF) is True
+
+
+# ---------------------------------------------------------------------------
+# path_for(): where a key lives, without touching anything
+# ---------------------------------------------------------------------------
+def test_path_for_is_the_path_write_returns(store: ParquetFactorStore) -> None:
+    """One key, one file: the address a caller is told is the file that was written."""
+    written = store.write(make_panel())
+
+    assert store.path_for(NAME, VERSION, AS_OF) == written
+    assert store.path_for(NAME, VERSION, "2024-12-31") == written
+
+
+def test_path_for_works_for_a_key_that_was_never_stored(tmp_path: Path) -> None:
+    """The path is computed, not looked up: nothing has to exist for an answer."""
+    root = tmp_path / "store"
+    store = ParquetFactorStore(root)
+
+    path = store.path_for(NAME, VERSION, AS_OF)
+
+    assert path == (
+        root
+        / f"factor_name={NAME}"
+        / f"factor_version={VERSION}"
+        / "year=2024"
+        / "as_of_date=2024-12-31.parquet"
+    )
+    assert not path.exists()
+    assert not root.exists()  # no directory, no file, no temporary residue
+
+
+def test_path_for_creates_nothing_under_an_existing_root(store: ParquetFactorStore) -> None:
+    """Asking for an address never becomes a write, not even a directory."""
+    store.root.mkdir()
+
+    store.path_for(NAME, VERSION, AS_OF)
+
+    assert list(store.root.iterdir()) == []
+
+
+def test_path_for_leaves_a_stored_panel_untouched(store: ParquetFactorStore) -> None:
+    """Reporting the location of a panel does not read, rewrite or restamp it."""
+    written = store.write(make_panel())
+    before = (written.stat().st_mtime_ns, written.read_bytes())
+
+    assert store.path_for(NAME, VERSION, AS_OF) == written
+
+    assert (written.stat().st_mtime_ns, written.read_bytes()) == before
+
+
+def test_path_for_agrees_with_exists_and_read(store: ParquetFactorStore) -> None:
+    """All three name the same key: one address, one file, one panel."""
+    written = store.write(make_panel())
+
+    assert store.path_for(NAME, VERSION, AS_OF) == written
+    assert store.exists(NAME, VERSION, AS_OF) is True
+    assert store.read(NAME, VERSION, AS_OF).as_of_date == AS_OF
+    assert store.path_for(NAME, VERSION, date(2024, 12, 30)) != written
+    assert store.exists(NAME, VERSION, date(2024, 12, 30)) is False
+
+
+@pytest.mark.parametrize("value", [None, 20241231, 20241231.0, True, object()])
+def test_path_for_refuses_an_illegal_session(store: ParquetFactorStore, value: Any) -> None:
+    """The key rules are the same ones ``exists`` and ``read`` apply."""
+    with pytest.raises(FactorStoreError, match="as_of_date"):
+        store.path_for(NAME, VERSION, value)
+    with pytest.raises(FactorStoreError, match="as_of_date"):
+        store.exists(NAME, VERSION, value)
+
+
+@pytest.mark.parametrize("value", ["2024-02-30", "2024-13-01", "31/12/2024", "  ", ""])
+def test_path_for_refuses_a_session_that_is_not_a_day(
+    store: ParquetFactorStore, value: Any
+) -> None:
+    with pytest.raises(FactorStoreError, match="as_of_date"):
+        store.path_for(NAME, VERSION, value)
+
+
+def test_path_for_refuses_a_datetime(store: ParquetFactorStore) -> None:
+    """A panel is stored per session: a time of day is not part of the key."""
+    with pytest.raises(FactorStoreError, match="datetime"):
+        store.path_for(NAME, VERSION, datetime(2024, 12, 31, 9, 30))
+
+
+@pytest.mark.parametrize("name", ["Not A Name", "", "momentum-12-1", None, 42])
+def test_path_for_refuses_an_illegal_name(store: ParquetFactorStore, name: Any) -> None:
+    with pytest.raises(FactorStoreError, match="factor_name"):
+        store.path_for(name, VERSION, AS_OF)
+
+
+@pytest.mark.parametrize("version", ["", "  ", None, 100, ".", ".."])
+def test_path_for_refuses_an_illegal_version(store: ParquetFactorStore, version: Any) -> None:
+    with pytest.raises(FactorStoreError, match="factor_version"):
+        store.path_for(NAME, version, AS_OF)
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "../escape",
+        "..\\escape",
+        "..\\..\\escape",
+        "a/b",
+        "a\\b",
+        "C:/evil",
+        "/absolute",
+        "..%2F..",
+        "with space",
+        "a\x00b",
+        "version..",
+        "version ",
+        "CON",
+        "nul.txt",
+    ],
+)
+def test_path_for_encodes_a_dangerous_version_inside_the_root(tmp_path: Path, version: str) -> None:
+    """The store's own encoding is used, so no version can name a path outside it."""
+    root = tmp_path / "store"
+    store = ParquetFactorStore(root)
+
+    path = store.path_for(NAME, version, AS_OF)
+
+    assert path.resolve().is_relative_to(root.resolve())
+    assert path.name == "as_of_date=2024-12-31.parquet"
+    version_dir = path.parents[1]
+    assert version_dir.name.startswith("factor_version=")
+    segment = version_dir.name.removeprefix("factor_version=")
+    assert "/" not in segment
+    assert "\\" not in segment
+    assert not path.exists()
+    assert not root.exists()
+
+
+def test_path_for_is_the_path_a_dangerous_version_is_written_to(tmp_path: Path) -> None:
+    """A hit reports exactly where the write of the same key put the panel."""
+    store = ParquetFactorStore(tmp_path / "store")
+    version = "..\\escape"
+
+    written = store.write(make_panel(version=version))
+
+    assert store.path_for(NAME, version, AS_OF) == written
+    assert written.is_file()
 
 
 # ---------------------------------------------------------------------------

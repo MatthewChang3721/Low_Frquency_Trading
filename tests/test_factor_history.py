@@ -148,12 +148,18 @@ def test_a_minimal_in_memory_store_can_implement_the_range_read() -> None:
             day = as_of_date if isinstance(as_of_date, date) else date.fromisoformat(as_of_date)
             return (factor_name, factor_version, day) in self.panels
 
+        def path_for(self, factor_name: str, factor_version: str, as_of_date: date | str) -> Path:
+            return Path(f"memory://{factor_name}/{factor_version}/{as_of_date}")
+
     memory = InMemoryStore()
     for session in (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)):
         memory.write(make_panel(as_of=session))
 
     loaded = memory.read_range(NAME, VERSION, "2024-01-02", "2024-01-03")
     assert [panel.as_of_date for panel in loaded] == [date(2024, 1, 2), date(2024, 1, 3)]
+    assert memory.path_for(NAME, VERSION, "2024-01-02") == Path(
+        f"memory://{NAME}/{VERSION}/2024-01-02"
+    )
 
 
 # ---------------------------------------------------------------------------

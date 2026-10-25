@@ -12,8 +12,9 @@ validated :class:`~factor_sys.contracts.FactorPanel` into something durable::
 ``FactorStore``
     the interface every backend implements: ``write(panel) -> Path``,
     ``read(factor_name, factor_version, as_of_date) -> FactorPanel``,
-    ``read_range(name, version, start_date, end_date) -> tuple[FactorPanel, ...]``
-    and ``exists(factor_name, factor_version, as_of_date) -> bool``
+    ``read_range(name, version, start_date, end_date) -> tuple[FactorPanel, ...]``,
+    ``exists(factor_name, factor_version, as_of_date) -> bool`` and
+    ``path_for(factor_name, factor_version, as_of_date) -> Path``
 ``ParquetFactorStore``
     the v1 implementation: exactly one Parquet file per stored panel, under the
     project's ``data/factors/panels`` by default
@@ -48,6 +49,14 @@ Trailing dots and spaces, which Windows silently strips, are encoded too, and a
 version a Windows device already owns (``CON``, ``NUL``, ``LPT1``, ...) is
 spelled with its first character encoded, so a version always names a directory
 the filesystem accepts as written.
+
+``path_for`` answers *where* a key lives without touching it: it applies exactly
+the key checks and the encoding ``write``, ``read`` and ``exists`` apply, and
+returns the path those methods would use.  It never creates, reads, writes or
+requires a file.  A caller that has to report or inspect the location of a
+stored panel (a command printing where its panel went, a test asserting an
+overwrite landed in the same place) therefore asks the store instead of copying
+its layout -- the layout is this module's private business.
 
 Metadata: how one file becomes one panel again
 ----------------------------------------------
@@ -126,7 +135,10 @@ What the store does not do
 --------------------------
 It does not compute a factor, read market bars, decide a universe, call a
 :class:`~factor_sys.runner.FactorRunner`, schedule dates, or implement a cache
-policy.  It stores and returns what it was given, and nothing else.
+policy.  It stores and returns what it was given, and nothing else: a caller may
+treat a stored panel as a cache by asking :meth:`FactorStore.exists` before
+computing (as ``scripts/run_factor.py`` does), but that decision -- and what a
+hit means -- belongs to the caller, not to this module.
 
 Layering
 --------
@@ -198,12 +210,13 @@ class FactorStore(ABC):
     freshly validated :class:`~factor_sys.contracts.FactorPanel` -- an object the
     caller may mutate through :attr:`FactorPanel.frame` without affecting the
     store or a later read -- ``read_range`` returns every stored panel of one
-    factor/version between two days, in date order, and ``exists`` answers whether
-    one key is stored without raising for a merely absent panel.
+    factor/version between two days, in date order, ``exists`` answers whether
+    one key is stored without raising for a merely absent panel, and ``path_for``
+    answers where that key's file is (or would be) without touching it.
 
     The interface says nothing about *how* a backend stores a panel; it only
-    fixes the four operations and their error contract: an impossible request or
-    a damaged store is always a :class:`~factor_sys.errors.FactorStoreError`.
+    fixes the operations and their error contract: an impossible request or a
+    damaged store is always a :class:`~factor_sys.errors.FactorStoreError`.
     """
 
     @abstractmethod
@@ -299,6 +312,33 @@ class FactorStore(ABC):
         A legal key with no panel is ``False``; an illegal key is still a
         :class:`~factor_sys.errors.FactorStoreError`, so a typo never looks like
         a cache miss.
+        """
+
+    @abstractmethod
+    def path_for(
+        self,
+        factor_name: str,
+        factor_version: str,
+        as_of_date: date | str,
+    ) -> Path:
+        """Return the location one key's panel has (or would have).
+
+        This is a *pure* question about a key, not about the disk: the key is
+        validated and encoded exactly as :meth:`write`, :meth:`read` and
+        :meth:`exists` validate and encode it, so the answer is the path those
+        methods use -- but nothing is created, read, written or required to
+        exist.  A key that was never stored therefore still has a path.
+
+        It exists so that a caller can report or inspect *where* a panel lives
+        without copying the backend's layout, which stays private to the
+        backend.
+
+        Raises
+        ------
+        FactorStoreError
+            If the key is illegal (an unknown name shape, a version that cannot
+            name a directory, a date that is not a day, a key that would resolve
+            outside the store).
         """
 
 
@@ -592,6 +632,21 @@ class ParquetFactorStore(FactorStore):
         """Whether a panel is stored for one key; never raises for a missing key."""
         target = self._key(factor_name, factor_version, as_of_date).target
         return target.is_file()
+
+    def path_for(
+        self,
+        factor_name: str,
+        factor_version: str,
+        as_of_date: date | str,
+    ) -> Path:
+        """Where this key's panel is (or would be): the same file the other methods use.
+
+        The single key of ``write``/``read``/``exists`` is validated and encoded
+        here, so the answer is that file's path whatever the version contains.
+        The path is computed, never checked: a key that was never stored still
+        has one, and nothing on disk is touched.
+        """
+        return self._key(factor_name, factor_version, as_of_date).target
 
     def _panel_at(self, key: _Key) -> FactorPanel:
         """Rebuild and validate the one panel stored at ``key``'s file.

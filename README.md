@@ -127,14 +127,14 @@ config/universe_seed.csv                # 20 只美股大型高流动性普通�
 ```python
 from data_sys.universe import load_universe_symbols, read_universe
 
-symbols = load_universe_symbols()          # 已标准化、去重、排序的 list[str]
-symbols = load_universe_symbols(active_only=False)   # 含 is_active=false 的证券
+symbols = load_universe_symbols()  # 已标准化、去重、排序的 list[str]
+symbols = load_universe_symbols(active_only=False)  # 含 is_active=false 的证券
 
-universe = read_universe()                 # 完整证券主数据
-universe.by_symbol()["AAPL"].exchange      # -> 'NASDAQ'
-universe.symbols                           # 全部代码（排序、去重）
-universe.active_symbols                    # 仅 is_active=true
-universe.to_frame()                        # DataFrame，列顺序 == 字段契约顺序
+universe = read_universe()  # 完整证券主数据
+universe.by_symbol()["AAPL"].exchange  # -> 'NASDAQ'
+universe.symbols  # 全部代码（排序、去重）
+universe.active_symbols  # 仅 is_active=true
+universe.to_frame()  # DataFrame，列顺序 == 字段契约顺序
 ```
 
 `validate_universe(frame)` 是同一套规则的**不抛异常**版本，返回问题列表（空列表代表合法），可直接用于校验内存中构造的股票池。
@@ -335,10 +335,86 @@ invalid universe configuration in 'config/universe_seed.csv'
 | `data_sys/update.py` | 单标的增量更新的**唯一实现**：计划 → 下载 → 合并 → 校验 → 暂存核验 → 原子发布 → 运行元数据；两个 CLI 都只是它的薄壳 |
 | `data_sys/data_query.py` | 单标的 Typer CLI（`python -m data_sys.data_query`） |
 | `data_sys/batch_query.py` | 整池批量 Typer CLI（`python -m data_sys.batch_query`）：选择标的、顺序执行、失败隔离、写批量汇总 |
+| `scripts/run_factor.py` | 因子研究层的最小真实入口：按名字建因子 → 决策日/日历校验 → 同键已存则读回（缓存命中）→ 否则读本地标准化行情、计算单日截面、质量检查、落盘 → 打印基础统计与 `cache_status`；`--force` 强制重算并原子覆盖（只组合 `factor_sys` 的公开接口） |
 
 分层依赖是单向的：`data_query` / `batch_query` → `update` → `planner` / `merge` / `storage` / `duckdb_verify` / `metadata` → `standardize` / `quality` / `market_calendar` → `schema` / `config` / `utils`；`summary` 只依赖 `storage`（因此这一层完全没有 DuckDB）。`storage` 与 `providers` 互不感知。`universe` 是独立于行情管道的一层（只依赖 `schema`/`config`/`errors`），由 `batch_query` 消费，行情管道本身不依赖它，因此两者可各自演进。
 
-## 8. 测试
+## 8. 运行一个因子截面
+
+因子研究层的**最小真实入口**：给出「因子名 + 决策日」，读本地已发布的标准化行情、计算一个截面、做质量检查、落盘，并打印基础统计。同一个 `(因子名, 版本, 决策日)` 已经算过时，默认直接读回已存的 Panel（轻量缓存），`--force` 可强制重算。
+
+```powershell
+# 在项目根目录、已激活虚拟环境后：
+python scripts/run_factor.py --factor momentum_12_1 --as-of 2024-12-31
+
+# 忽略已存 Panel，重新读取行情、重新计算并原子覆盖：
+python scripts/run_factor.py --factor momentum_12_1 --as-of 2024-12-31 --force
+```
+
+可选参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `--factor NAME` | 必填。通过 `default_factor_registry()` 按名字查找因子（脚本不 import 任何公式模块） |
+| `--as-of YYYY-MM-DD` | 必填。决策日，必须是交易日历（默认 `XNYS`）上的真实会话 |
+| `--data-root PATH` | 可选。**同时**决定行情来源 `<PATH>/standardized/market_bars` 与因子落盘 `<PATH>/factors/panels`；默认 `PipelineConfig().data_root` |
+| `--universe-path PATH` | 可选。只替换静态股票池 CSV；默认 `config/universe_seed.csv` |
+| `--calendar NAME` | 可选。交易日历名；默认沿用数据系统与 Runner 的 `XNYS` |
+| `--force` | 可选，无值开关。忽略缓存，重新读行情、重新计算，并原子覆盖同一个 Panel 文件 |
+
+固定调用顺序（前四步命中与未命中共用，每一步都只走该层已有的公开接口，脚本本身不实现存储、质量或公式规则）：
+
+```text
+default_factor_registry() → registry.create(name) → 决策日 + 交易日历校验
+→ ParquetFactorStore.exists(name, version, as_of)
+    命中且未传 --force：ParquetFactorStore.read(panel)
+                       → 默认质量检查器 inspect → QuickAnalyzer.summarize → 打印
+    未命中或 --force：StaticUniverseProvider → ParquetMarketDataReader → FactorRunner.run()
+                     → ParquetFactorStore.write(panel) → QuickAnalyzer.summarize → 打印
+```
+
+需要知道的几点：
+
+1. **只读本地数据**：命令读取已发布的标准化 Parquet，**不下载、不联网、不更新 `data/`**；缺少行情目录或目录为空会直接报错，而不是尝试抓取。
+2. **该日期需要有足够历史**：`momentum_12_1` 需要决策日之前至少 252 个交易日（连同决策日共 253 根 bar）；历史不足的标的会被标记为不合格，而不是猜测价格。
+3. **输出是单日截面**：因子面板（每标的一行 `raw_value` / `is_eligible`）+ 质量发现 + 基础描述统计（`universe_size`、`eligible_count`、`eligible_coverage`、`valid_count`、`missing_count`、`missing_rate`、`mean`、`std`、`minimum`、`maximum`）+ `stored_panel_path`、`quality_status` 与 `cache_status: hit|miss|forced`。
+4. **Panel 会写入**：
+
+   ```text
+   data/factors/panels/
+     factor_name=<name>/
+       factor_version=<version>/
+         year=<year>/
+           as_of_date=<date>.parquet
+   ```
+
+5. **同键默认读缓存**：`(factor_name, factor_version, as_of_date)` 相同且文件已存在时，直接读回该 Panel（详见下面的「缓存语义」）；`--force` 才会重新计算并原子覆盖同一个文件，任何情况下都不会产生第二个文件。
+6. **质量报告是软发现**：有 issue 时输出 `quality_status: reported` 并逐条打印 `quality_issue_code` / `_severity` / `_message` / `_affected_symbols`，Panel 仍然写出；退出码 `0` 表示运行成功，`1` 表示领域错误（未知因子、非交易日、未知日历、股票池不可读、行情缺失、写入失败、缓存文件损坏等，stderr 一行 `error: ...`），`2` 由 argparse 给出（缺参数或未知参数）。
+7. **这不是回测**：不产生真实或模拟订单，也没有交易成本、持仓或收益曲线。
+8. **仍有幸存者偏差**：`StaticUniverseProvider` 使用静态股票池（今天的成分股），历史研究无法消除退市与成分变更带来的偏差。
+
+### 缓存语义（`cache_status`）
+
+| `cache_status` | 含义 |
+| --- | --- |
+| `miss` | 该键此前不存在：读取行情 → 计算 → 写入新 Panel |
+| `hit` | 该键已存在：直接读回 Panel，**不读行情、不重新计算、不覆盖文件** |
+| `forced` | 传了 `--force`：无论是否存在都重新计算并原子覆盖（不存在时就是一次首次计算） |
+
+- 缓存默认开启，键只有 `(factor_name, factor_version, as_of_date)`，不需要额外参数。
+- 命中时仍然重新做质量检查与统计：Factor Store 只保存 Panel，不保存旧的 `FactorQualityReport`，所以读回后按**当前**质量规则重新 `inspect`，再 `QuickAnalyzer.summarize`，输出的仍是同一套摘要格式。
+- 命中时文件不被触碰：Panel 字节与修改时间都不变（`stored_panel_path` 就是那个已读文件）。
+- 已存在但损坏、元数据不一致或无法恢复的缓存文件会让命令失败（退出码 `1`，stderr 一行 `error: ...`），**不会**悄悄重算并覆盖：坏文件是证据，需要手工处理或删除。
+- 非交易日、非法 `--calendar`、未注册的因子在查询缓存之前就失败：某个同日期文件恰好存在也不会被当成命中。
+- 需要 `--force` 的时机：更新了历史行情、替换了静态股票池、修改了因子实现或参数之后。
+- 缓存**只**按因子名、版本与日期判断，不追踪行情版本、股票池版本或代码提交版本——它没有数据血缘，也不是严格的数据版本缓存。
+- 因子公式或含义有实质变化时，优先**升级 `factor_version`**（得到新键、新目录，可与旧结果并存），而不是只依赖 `--force`。
+
+这个缓存**不是**：严格数据版本缓存、数据血缘追踪、多日期调度、因子历史回测，也不会自动更新行情。
+
+本入口刻意**不包含**：多日期批量、日期区间、调仓日历、因子 transforms、未来收益标签、IC / ICIR、分位收益与 Top–Bottom spread、策略信号与回测。这些都需要**历史日期序列**，留给后续的独立研究命令或回测系统；缓存只是同键读回，不是多日期调度。
+
+## 9. 测试
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest            # 全部 261 项
@@ -356,9 +432,10 @@ invalid universe configuration in 'config/universe_seed.csv'
 - `test_planner.py` / `test_market_calendar.py` / `test_merge.py` — 下载窗口的判定（首次回填 / 头部 / 内部缺口 / 尾部 / 重叠刷新 / 无会话）、NYSE 会话边界（跨周末与假日的「相邻」判定、区间裁剪、最近 N 个会话）、合并语义（同日新行胜出、派生列整段重算、边界行不残留旧 `daily_return`）；
 - `test_summary.py` — 正式数据的 `(symbol, year)` 汇总（字段与排序、JSON 安全、就地替换 10 次后仍可读；与 DuckDB 汇总只在一个**新建**数据集上对照），以及**架构守卫**：`summary` 与 `batch_query` 的源码里绝不出现 `import duckdb`；
 - `test_pipeline.py` — 编排成功路径与失败路径的退出码、元数据落盘、暂存区清理；
-- `test_standardize.py` / `test_quality.py` / `test_yahoo.py` — 字段映射、质量规则、provider 重试与错误包装，以及**代码拼写回退**（`BRK.B` 先试规范拼写、失败后改试 `BRK-B`；交易所后缀 `RY.TO` 不会被改写；全部失败时报错会列出试过的每个拼写）。
+- `test_standardize.py` / `test_quality.py` / `test_yahoo.py` — 字段映射、质量规则、provider 重试与错误包装，以及**代码拼写回退**（`BRK.B` 先试规范拼写、失败后改试 `BRK-B`；交易所后缀 `RY.TO` 不会被改写；全部失败时报错会列出试过的每个拼写）；
+- `test_run_factor.py` — 因子入口端到端（真实 Hive Parquet + 临时股票池）：面板与统计值用独立实现对照、`ParquetFactorStore.read` 读回一致、清洁与部分覆盖两种质量结论、未知因子 / 非交易日 / 行情缺失 / 字段缺失时**非零退出且不落盘**、`--data-root` 与 `--universe-path` 的实际作用范围、断网仍可运行；缓存三种状态（`miss` / `hit` / `forced`：命中时**不读行情、不跑 Runner、不调用 `write`**，文件字节与 mtime 不变；`--force` 时三者都真的被调用且只留一个文件、无 `.tmp` 残留；损坏的缓存文件失败且不被覆盖；周末即使有人为放置的同名文件也不会命中；未知 `--calendar` 在查询缓存前失败），以及**架构守卫**（不 import 公式模块、不重算公式或质量规则、不使用 Factor Store 私有成员也不复制其路径编码、没有日期区间参数）。
 
-## 9. 已知限制与后续
+## 10. 已知限制与后续
 
 **本 MVP 明确不包含**（属于设计文档后续阶段）：
 

@@ -10,9 +10,12 @@ Layering of the project::
         |
     factors/      factor *formulas and parameters only* -- no I/O, no paths
 
-This step implements the **factor data contract**: the objects a formula and the
-factor runner exchange, so that every factor is validated the same way before
-anything is computed or stored.
+This package started with the **factor data contract**: the objects a formula and
+the factor runner exchange, so that every factor is validated the same way before
+anything is computed or stored.  It now also owns the research additions that
+live *outside* that contract: the forward-return labels measured after a
+decision, the Spearman IC evaluation of a factor against them, and the quantile
+grouping of a cross-section that asks which end of the ranking earned what.
 
 ``FactorSpec``
     what a factor needs: name, version, required fields, lookback
@@ -80,11 +83,49 @@ anything is computed or stored.
 ``QuickAnalysisError``
     a sequence of panels that cannot be described as one factor's history
     (mixed factors or versions, a repeated date, something that is not a panel)
+``ForwardReturnPanel`` / ``ForwardReturnCalculator``
+    the research label measured *after* a decision: for one factor, one session
+    and one horizon, the close-to-close total return of every universe symbol
+    ``h`` exchange sessions later (``adjusted_close(end) / adjusted_close(t) -
+    1``), with unusable prices marked ``is_available=False`` instead of guessed.
+    Labels read bars through ``MarketDataReader`` at the very end of the
+    pipeline and never travel back into a context, a panel or a factor
+``ForwardReturnError``
+    a label that cannot be built or cannot be trusted (not a panel, an invalid
+    horizon, a date that is not a session, an untrustworthy reader answer)
+``ICObservation`` / ``ICReport`` / ``ICAnalyzer``
+    the after-the-fact question "did higher factor values precede higher
+    returns?": one cross-sectional Spearman rank IC per session (average ranks,
+    ties included), and the frozen report that summarizes a history of them --
+    mean IC, sample deviation (``ddof=1``) and ICIR.  The ranks live inside the
+    statistic and are thrown away: no ``FactorPanel`` is written back, no
+    transformed factor is produced, and nothing is stored.  Panels and labels
+    in, a report out
+``ICAnalysisError``
+    a request or a report that contradicts itself: an invalid ``min_pairs``, two
+    date sets that do not match, a universe that moved between a panel and its
+    labels, a hand-built report whose averages disagree with its observations
+``QuantileObservation`` / ``QuantileSpreadObservation`` / ``QuantileReport`` /
+``QuantileAnalyzer``
+    the second after-the-fact question, "did the *ranked* cross-section behave
+    as the factor promised?": one decision date's usable symbols sorted by
+    ``raw_value`` into ``Q`` equal-rank groups, each group's equal-weighted mean
+    forward return, and the top-minus-bottom spread.  Ties share an average rank
+    and are never split, an empty group is reported as ``None`` instead of
+    ``0.0``, and the whole history is frozen into one report.  It is research
+    evidence over realized labels, not a tradable portfolio: no order, no fill,
+    no cost, no holding period
+``QuantileAnalysisError``
+    a request or a report that contradicts itself: an invalid ``quantiles``, two
+    date sets that do not match, a universe that moved between a panel and its
+    labels, a spread that is not the difference of its own extremes, or a report
+    whose member counts do not add up
 
 Not implemented yet, on purpose: multi-date factor batches, a cache-hit policy,
 transforms (``zscore``/``rank``), registry auto-discovery (plugins, entry points,
-config files), forward returns, IC/ICIR and quantile-portfolio analysis,
-strategies and backtests.
+config files), multi-factor combination, industry neutralization, annualized
+ICIR and risk-adjusted statistics (Sharpe, t-statistics, Newey-West), execution,
+costs, slippage, strategies and backtests.
 
 Example
 -------
@@ -111,16 +152,31 @@ from factor_sys.errors import (
     FactorRegistryError,
     FactorRunError,
     FactorStoreError,
+    ForwardReturnError,
+    ICAnalysisError,
     MarketDataReadError,
+    QuantileAnalysisError,
     QuickAnalysisError,
 )
 from factor_sys.factor_store import FactorStore, ParquetFactorStore
+from factor_sys.forward_returns import (
+    FORWARD_RETURN_COLUMNS,
+    ForwardReturnCalculator,
+    ForwardReturnPanel,
+)
+from factor_sys.ic_analysis import ICAnalyzer, ICObservation, ICReport
 from factor_sys.market_data import MarketDataReader, ParquetMarketDataReader
 from factor_sys.quality import (
     DefaultFactorQualityChecker,
     FactorQualityChecker,
     FactorQualityIssue,
     FactorQualityReport,
+)
+from factor_sys.quantile_analysis import (
+    QuantileAnalyzer,
+    QuantileObservation,
+    QuantileReport,
+    QuantileSpreadObservation,
 )
 from factor_sys.quick_analysis import FactorPanelStatistics, QuickAnalyzer
 from factor_sys.registry import FactorRegistry, default_factor_registry
@@ -137,6 +193,7 @@ __all__ = [
     "BAR_REQUIRED_COLUMNS",
     "FACTOR_NAME_PATTERN",
     "FACTOR_PANEL_COLUMNS",
+    "FORWARD_RETURN_COLUMNS",
     "DefaultFactorQualityChecker",
     "Factor",
     "FactorContext",
@@ -155,10 +212,22 @@ __all__ = [
     "FactorSpec",
     "FactorStore",
     "FactorStoreError",
+    "ForwardReturnCalculator",
+    "ForwardReturnError",
+    "ForwardReturnPanel",
+    "ICAnalysisError",
+    "ICAnalyzer",
+    "ICObservation",
+    "ICReport",
     "MarketDataReadError",
     "MarketDataReader",
     "ParquetFactorStore",
     "ParquetMarketDataReader",
+    "QuantileAnalysisError",
+    "QuantileAnalyzer",
+    "QuantileObservation",
+    "QuantileReport",
+    "QuantileSpreadObservation",
     "QuickAnalysisError",
     "QuickAnalyzer",
     "StaticUniverseProvider",

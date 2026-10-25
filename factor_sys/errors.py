@@ -153,6 +153,118 @@ class QuickAnalysisError(FactorError):
         super().__init__(_with_problems(message, self.problems))
 
 
+class ForwardReturnError(FactorError):
+    """Raised when a forward-return label cannot be built or cannot be trusted.
+
+    Two different failures land here, and both are about the *label*, never
+    about a factor:
+
+    * a request that cannot be honoured -- something that is not a
+      :class:`~factor_sys.contracts.FactorPanel`, a horizon that is not a
+      positive number of sessions, a decision date that is not a session of the
+      calendar, a reader that is not a
+      :class:`~factor_sys.market_data.MarketDataReader`, a calendar name that
+      cannot be resolved;
+    * an answer that cannot be believed -- a reader that returns something other
+      than a bar frame, a missing ``date``/``symbol``/``adjusted_close`` column,
+      a duplicated ``(symbol, date)``, a symbol outside the universe, or a date
+      outside ``[as_of_date, end_date]``.  A label built on such an answer would
+      be silently wrong, so it is refused instead of interpreted.
+
+    A *missing or unusable price* is deliberately **not** an error: that symbol's
+    label travels back with ``is_available=False`` and ``forward_return=NaN``, so
+    one gap never destroys the rest of the cross-section.
+
+    Attributes
+    ----------
+    problems:
+        Every reason the request or the label table was refused, collected the
+        way :class:`FactorContractError` collects them, so one failed call names
+        all the offending rows at once.
+    """
+
+    def __init__(self, message: str, problems: Sequence[str] | None = None) -> None:
+        self.problems: list[str] = list(problems) if problems else []
+        super().__init__(_with_problems(message, self.problems))
+
+
+class ICAnalysisError(FactorError):
+    """Raised when panels cannot be measured as one IC history.
+
+    Only the *shape of the request* fails here -- never the data it carries:
+
+    * an ``ICAnalyzer`` built with a ``min_pairs`` a correlation cannot use
+      (anything below two, or not an integer at all);
+    * two sequences that are not one factor's history: something that is not a
+      panel, a single panel instead of an iterable, an empty sequence, two
+      factor names or versions, two label horizons, or a repeated date;
+    * a join that does not close: a date with a factor panel but no labels (or
+      the other way round), an identity that differs between a panel and its
+      labels, or a universe that moved or was re-ordered between them;
+    * a hand-built :class:`~factor_sys.ic_analysis.ICObservation` or
+      :class:`~factor_sys.ic_analysis.ICReport` whose fields contradict each
+      other: a coverage its counts cannot produce, an IC outside ``[-1, 1]``, a
+      count that disagrees with the observations, or a mean that is not the mean
+      of the ICs it holds.
+
+    An *undefined* correlation is deliberately **not** an error.  Too few pairs,
+    or a sample that is constant on one side, is reported as ``ic=None`` and
+    stays in the report, because "this session carries no IC" is a fact about
+    the factor, not a broken request.
+
+    Attributes
+    ----------
+    problems:
+        Every reason the request or the report was refused, collected the way
+        :class:`FactorContractError` collects them, so one failed call names all
+        the offending panels at once.
+    """
+
+    def __init__(self, message: str, problems: Sequence[str] | None = None) -> None:
+        self.problems: list[str] = list(problems) if problems else []
+        super().__init__(_with_problems(message, self.problems))
+
+
+class QuantileAnalysisError(FactorError):
+    """Raised when panels cannot be measured as one quantile history.
+
+    Only the *shape of the request* fails here -- never the data it carries:
+
+    * a ``QuantileAnalyzer`` built with a ``quantiles`` that is not an integer of
+      at least two (a ``bool``, a float, a string, one, zero or a negative);
+    * two sequences that are not one factor's history: something that is not a
+      panel, a single panel instead of an iterable, an empty sequence, two factor
+      names or versions, two label horizons, or a repeated date;
+    * a join that does not close: a date with a factor panel but no labels (or
+      the other way round), an identity that differs between a panel and its
+      labels, or a universe that moved or was re-ordered between them;
+    * a hand-built :class:`~factor_sys.quantile_analysis.QuantileObservation`,
+      :class:`~factor_sys.quantile_analysis.QuantileSpreadObservation` or
+      :class:`~factor_sys.quantile_analysis.QuantileReport` whose fields
+      contradict each other: a coverage its counts cannot produce, a mean on an
+      empty group, a spread that is not the difference of its own extremes, a
+      group count that disagrees with the observations, or a report whose member
+      counts do not add up to the paired count of its session.
+
+    An *empty group* or a *session with no usable symbol* is deliberately **not**
+    an error.  It is reported with ``member_count=0``, ``mean_forward_return=None``
+    and -- when an extreme group is empty -- ``top_minus_bottom=None``, because
+    "this group has no member" is a fact about the cross-section, not a broken
+    request.
+
+    Attributes
+    ----------
+    problems:
+        Every reason the request or the report was refused, collected the way
+        :class:`FactorContractError` collects them, so one failed call names all
+        the offending panels at once.
+    """
+
+    def __init__(self, message: str, problems: Sequence[str] | None = None) -> None:
+        self.problems: list[str] = list(problems) if problems else []
+        super().__init__(_with_problems(message, self.problems))
+
+
 __all__ = [
     "FactorError",
     "FactorContractError",
@@ -161,4 +273,7 @@ __all__ = [
     "FactorRegistryError",
     "FactorStoreError",
     "QuickAnalysisError",
+    "ForwardReturnError",
+    "ICAnalysisError",
+    "QuantileAnalysisError",
 ]

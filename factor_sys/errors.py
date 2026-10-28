@@ -225,6 +225,28 @@ class ICAnalysisError(FactorError):
         super().__init__(_with_problems(message, self.problems))
 
 
+class FactorScheduleError(FactorError):
+    """Raised when a decision-date schedule cannot be selected as requested.
+
+    Only the *rule* fails here, never the calendar it is evaluated against:
+
+    * a ``frequency`` that is not ``weekly``, ``biweekly`` or ``monthly``;
+    * an ``anchor_weekday`` that is not one of ``MON``..``FRI`` (or ``None``),
+      including an anchor passed for a monthly cadence, which has no anchor;
+    * a ``start_date``/``end_date`` that is not a plain date or a strict ISO
+      ``"YYYY-MM-DD"`` string, or a window whose start is after its end;
+    * a trading calendar that cannot be loaded;
+    * a hand-built :class:`~factor_sys.factor_schedule.DecisionSchedule` whose
+      fields contradict each other: an unknown cadence, an anchor a monthly
+      schedule cannot have, dates outside the requested window, or dates that
+      are not strictly ascending.
+
+    An *empty* selection is deliberately **not** an error: a window may simply
+    hold no decision day (a Thursday anchor over a two-day window that ends on
+    Wednesday), and that is reported as an empty tuple of dates.
+    """
+
+
 class QuantileAnalysisError(FactorError):
     """Raised when panels cannot be measured as one quantile history.
 
@@ -265,6 +287,45 @@ class QuantileAnalysisError(FactorError):
         super().__init__(_with_problems(message, self.problems))
 
 
+class FactorResearchError(FactorError):
+    """Raised when one multi-date research analysis cannot be produced as asked.
+
+    Only the *orchestration* of the research entry point fails here, never the
+    data it measures:
+
+    * a request that cannot be honoured -- a ``horizon_sessions`` that is not a
+      positive whole number of sessions, a ``quantiles`` below two, a
+      ``min_pairs`` a correlation cannot use, a blank or unusable ``data_root``
+      or ``report_root``;
+    * a selection with nothing to measure or with holes in it -- a schedule that
+      selected no decision date, at least one selected date that failed (the
+      analysis is refused instead of quietly measuring the dates that survived),
+      or a batch whose manifest could not be written;
+    * a report that cannot be published -- a directory that cannot be created,
+      a table or a metadata file that cannot be written, or an incomplete or
+      unpublishable staging directory, in which case nothing is left behind.
+
+    Everything about *one date* stays with the layer that owns it: a damaged
+    panel is a :class:`FactorStoreError` recorded by the batch, a missing price
+    is an unavailable label (never an error), and a hard refusal of the label,
+    IC or quantile layer keeps its own type -- a
+    :class:`ForwardReturnError`, :class:`ICAnalysisError` or
+    :class:`QuantileAnalysisError` travels back unchanged, so a caller can tell
+    "the request was incomplete" from "the analysis refused these objects".
+
+    Attributes
+    ----------
+    problems:
+        Every reason the request, the selection or the report was refused,
+        collected the way :class:`FactorContractError` collects them, so one
+        failed call names all of them at once.
+    """
+
+    def __init__(self, message: str, problems: Sequence[str] | None = None) -> None:
+        self.problems: list[str] = list(problems) if problems else []
+        super().__init__(_with_problems(message, self.problems))
+
+
 __all__ = [
     "FactorError",
     "FactorContractError",
@@ -272,8 +333,10 @@ __all__ = [
     "FactorRunError",
     "FactorRegistryError",
     "FactorStoreError",
+    "FactorScheduleError",
     "QuickAnalysisError",
     "ForwardReturnError",
     "ICAnalysisError",
     "QuantileAnalysisError",
+    "FactorResearchError",
 ]

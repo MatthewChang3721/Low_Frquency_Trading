@@ -120,12 +120,32 @@ grouping of a cross-section that asks which end of the ranking earned what.
     date sets that do not match, a universe that moved between a panel and its
     labels, a spread that is not the difference of its own extremes, or a report
     whose member counts do not add up
+``DecisionSchedule`` / ``decision_schedule`` / ``select_decision_dates``
+    the pure date rule behind a multi-date run: given a closed window, a cadence
+    (``weekly``/``biweekly``/``monthly``), an anchor weekday and a calendar, the
+    sessions a study decides on -- one per week (the anchor, or the session
+    before it when the exchange is closed), every second of those weeks, or the
+    last session of each month.  It selects dates only: no bars, no factor, no
+    file, so the factor batch and the future IC / quantile batches share one
+    definition of "the same dates"
+``FactorScheduleError``
+    a cadence, anchor, window or calendar that cannot be honoured (an inverted
+    window, an unknown weekday, an anchor passed for a monthly schedule)
+``FactorResearchError``
+    a multi-date research analysis that cannot be produced: an unusable horizon,
+    group count or path, a schedule that selected no decision date, a selected
+    date that failed, or a report that cannot be published.  The layers
+    underneath keep their own errors, so "the data was missing" stays
+    distinguishable from "these objects do not belong together"
 
-Not implemented yet, on purpose: multi-date factor batches, a cache-hit policy,
-transforms (``zscore``/``rank``), registry auto-discovery (plugins, entry points,
-config files), multi-factor combination, industry neutralization, annualized
-ICIR and risk-adjusted statistics (Sharpe, t-statistics, Newey-West), execution,
-costs, slippage, strategies and backtests.
+Not implemented yet, on purpose: transforms (``zscore``/``rank``), registry
+auto-discovery (plugins, entry points, config files), multi-factor combination,
+industry neutralization, annualized ICIR and risk-adjusted statistics (Sharpe,
+t-statistics, Newey-West), execution, costs, slippage, strategies and backtests.
+Two multi-date entry points exist -- ``scripts/run_factor_batch.py`` (panels and
+their manifest) and ``scripts/analyze_factor.py`` (panels, forward-return
+labels, IC and quantile reports) -- and neither introduces a cache-invalidation
+policy beyond the per-key lookup of ``scripts/run_factor.py``.
 
 Example
 -------
@@ -150,13 +170,28 @@ from factor_sys.errors import (
     FactorContractError,
     FactorError,
     FactorRegistryError,
+    FactorResearchError,
     FactorRunError,
+    FactorScheduleError,
     FactorStoreError,
     ForwardReturnError,
     ICAnalysisError,
     MarketDataReadError,
     QuantileAnalysisError,
     QuickAnalysisError,
+)
+from factor_sys.factor_schedule import (
+    ANCHOR_WEEKDAYS,
+    BIWEEKLY,
+    BIWEEKLY_ANCHOR,
+    DEFAULT_ANCHOR_WEEKDAY,
+    DEFAULT_FREQUENCY,
+    FREQUENCIES,
+    MONTHLY,
+    WEEKLY,
+    DecisionSchedule,
+    decision_schedule,
+    select_decision_dates,
 )
 from factor_sys.factor_store import FactorStore, ParquetFactorStore
 from factor_sys.forward_returns import (
@@ -190,10 +225,17 @@ from factor_sys.universe import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "ANCHOR_WEEKDAYS",
     "BAR_REQUIRED_COLUMNS",
+    "BIWEEKLY",
+    "BIWEEKLY_ANCHOR",
+    "DEFAULT_ANCHOR_WEEKDAY",
+    "DEFAULT_FREQUENCY",
+    "DecisionSchedule",
     "FACTOR_NAME_PATTERN",
     "FACTOR_PANEL_COLUMNS",
     "FORWARD_RETURN_COLUMNS",
+    "FREQUENCIES",
     "DefaultFactorQualityChecker",
     "Factor",
     "FactorContext",
@@ -206,9 +248,11 @@ __all__ = [
     "FactorQualityReport",
     "FactorRegistry",
     "FactorRegistryError",
+    "FactorResearchError",
     "FactorRunError",
     "FactorRunResult",
     "FactorRunner",
+    "FactorScheduleError",
     "FactorSpec",
     "FactorStore",
     "FactorStoreError",
@@ -219,6 +263,7 @@ __all__ = [
     "ICAnalyzer",
     "ICObservation",
     "ICReport",
+    "MONTHLY",
     "MarketDataReadError",
     "MarketDataReader",
     "ParquetFactorStore",
@@ -233,6 +278,9 @@ __all__ = [
     "StaticUniverseProvider",
     "UniverseProvider",
     "UniverseSnapshot",
+    "WEEKLY",
     "__version__",
+    "decision_schedule",
     "default_factor_registry",
+    "select_decision_dates",
 ]

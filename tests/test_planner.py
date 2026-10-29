@@ -7,12 +7,17 @@ calendar, which ships with the holiday rules.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
 from data_sys.errors import DataPipelineError
-from data_sys.market_calendar import get_calendar, last_sessions, sessions_in_range
+from data_sys.market_calendar import (
+    calendar_bounds,
+    get_calendar,
+    last_sessions,
+    sessions_in_range,
+)
 from data_sys.planner import (
     REASON_HEAD,
     REASON_INITIAL,
@@ -53,9 +58,7 @@ def test_new_symbol_downloads_the_whole_requested_window(calendar) -> None:
     assert plan.status == STATUS_PLANNED
     assert plan.is_initial is True
     assert plan.has_work is True
-    assert plan.windows == (
-        DownloadWindow(date(2024, 1, 2), date(2024, 3, 29), (REASON_INITIAL,)),
-    )
+    assert plan.windows == (DownloadWindow(date(2024, 1, 2), date(2024, 3, 29), (REASON_INITIAL,)),)
     assert plan.expected_sessions == len(sessions_in_range(calendar, "2024-01-02", "2024-03-29"))
     assert plan.missing_sessions == tuple(_published("2024-01-02", "2024-03-29"))
     assert plan.missing_ranges == ((date(2024, 1, 2), date(2024, 3, 29)),)
@@ -73,9 +76,7 @@ def test_new_symbol_window_uses_the_request_not_the_session_span(calendar) -> No
 
 
 def test_new_symbol_does_not_add_a_refresh_window(calendar) -> None:
-    plan = plan_download(
-        "AAPL", "2024-01-02", "2024-03-29", set(), calendar=calendar
-    )
+    plan = plan_download("AAPL", "2024-01-02", "2024-03-29", set(), calendar=calendar)
 
     assert len(plan.windows) == 1
     assert plan.overlap_sessions == ()
@@ -91,7 +92,11 @@ def test_tail_gap_is_merged_with_the_overlap_window(calendar) -> None:
     existing = _published("2026-01-02", "2026-09-28")
 
     plan = plan_download(
-        "AAPL", "2026-01-02", "2026-09-30", existing, calendar=calendar,
+        "AAPL",
+        "2026-01-02",
+        "2026-09-30",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=5,
     )
 
@@ -112,7 +117,11 @@ def test_tail_gap_is_reported_separately_from_the_refresh_range(calendar) -> Non
     existing = _published("2024-01-02", "2024-01-31")
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-02-29", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-02-29",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=3,
     )
 
@@ -129,7 +138,11 @@ def test_internal_gap_becomes_its_own_window(calendar) -> None:
     existing = _published("2024-01-02", "2024-03-29", drop=("2024-03-05", "2024-03-06"))
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-03-29", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-03-29",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=5,
     )
 
@@ -153,7 +166,11 @@ def test_two_internal_gaps_become_two_windows(calendar) -> None:
     )
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-03-29", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-03-29",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=0,
     )
 
@@ -170,7 +187,11 @@ def test_a_weekend_is_not_an_internal_gap(calendar) -> None:
     existing = [date(2024, 1, 4), date(2024, 1, 5), date(2024, 1, 8), date(2024, 1, 9)]
 
     plan = plan_download(
-        "AAPL", "2024-01-04", "2024-01-09", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-04",
+        "2024-01-09",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=0,
     )
 
@@ -184,7 +205,11 @@ def test_friday_and_monday_missing_are_a_single_gap(calendar) -> None:
     existing = _published("2024-01-02", "2024-01-31", drop=("2024-01-05", "2024-01-08"))
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-01-31", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-01-31",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=0,
     )
 
@@ -200,7 +225,11 @@ def test_head_gap_backfills_the_history_before_the_local_minimum(calendar) -> No
     existing = _published("2024-06-03", "2024-12-31")
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-12-31", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-12-31",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=5,
     )
 
@@ -227,7 +256,11 @@ def test_head_gap_window_starts_on_a_session_when_the_request_starts_on_a_holida
     existing = _published("2024-06-03", "2024-12-31")
 
     plan = plan_download(
-        "AAPL", "2024-01-01", "2024-12-31", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-01",
+        "2024-12-31",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=0,
     )
 
@@ -242,7 +275,11 @@ def test_fully_covered_history_only_refreshes_the_last_n_sessions(calendar) -> N
     existing = _published("2024-01-02", "2024-06-28")
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-06-28", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-06-28",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=5,
     )
 
@@ -260,14 +297,16 @@ def test_the_refresh_window_never_reaches_before_the_requested_start(calendar) -
     existing = [date(2024, 1, 2), date(2024, 1, 3)]
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-01-03", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-01-03",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=5,
     )
 
     assert plan.overlap_sessions == (date(2024, 1, 2), date(2024, 1, 3))
-    assert plan.windows == (
-        DownloadWindow(date(2024, 1, 2), date(2024, 1, 3), (REASON_OVERLAP,)),
-    )
+    assert plan.windows == (DownloadWindow(date(2024, 1, 2), date(2024, 1, 3), (REASON_OVERLAP,)),)
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +316,11 @@ def test_refresh_disabled_means_no_download_at_all(calendar) -> None:
     existing = _published("2024-01-02", "2024-06-28")
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-06-28", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-06-28",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=0,
     )
 
@@ -293,7 +336,11 @@ def test_a_negative_refresh_width_behaves_like_zero(calendar) -> None:
     existing = _published("2024-01-02", "2024-06-28")
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-06-28", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-06-28",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=-4,
     )
 
@@ -305,13 +352,15 @@ def test_refresh_disabled_still_fills_real_gaps(calendar) -> None:
     existing = _published("2024-01-02", "2024-06-28", drop=("2024-03-05",))
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-06-28", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-06-28",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=0,
     )
 
-    assert plan.windows == (
-        DownloadWindow(date(2024, 3, 5), date(2024, 3, 5), (REASON_INTERNAL,)),
-    )
+    assert plan.windows == (DownloadWindow(date(2024, 3, 5), date(2024, 3, 5), (REASON_INTERNAL,)),)
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +388,11 @@ def test_a_safe_skip_leaves_existing_history_alone(calendar) -> None:
     existing = _published("2024-01-02", "2024-06-28")
 
     plan = plan_download(
-        "AAPL", "2024-07-06", "2024-07-07", existing, calendar=calendar,
+        "AAPL",
+        "2024-07-06",
+        "2024-07-07",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=5,
     )
 
@@ -368,12 +421,18 @@ def test_a_request_entirely_before_the_calendar_is_a_safe_skip(calendar) -> None
 # clamping, inputs and serialization
 # ---------------------------------------------------------------------------
 def test_a_request_before_the_calendar_start_is_clamped_and_recorded(calendar) -> None:
-    plan = plan_download("AAPL", "2006-01-01", "2006-12-31", None, calendar=calendar)
+    # Derived from the calendar's real first session: the clamp must land there,
+    # whichever date the installed exchange_calendars starts XNYS at.
+    first_session, _ = calendar_bounds(calendar)
+    requested_start = first_session - timedelta(days=30)
+    requested_end = first_session + timedelta(days=60)
 
-    assert plan.requested_start == date(2006, 1, 1)
-    assert plan.effective_start == date(2006, 10, 2)
-    assert plan.windows[0].start == date(2006, 10, 2)
-    assert plan.windows[0].end == date(2006, 12, 31)
+    plan = plan_download("AAPL", requested_start, requested_end, None, calendar=calendar)
+
+    assert plan.requested_start == requested_start
+    assert plan.effective_start == first_session
+    assert plan.windows[0].start == first_session
+    assert plan.windows[0].end == requested_end
     assert any("clamped to the first XNYS session" in note for note in plan.notes)
 
 
@@ -398,7 +457,11 @@ def test_dates_outside_the_request_are_ignored_when_looking_for_gaps(calendar) -
     existing = _published("2022-01-03", "2024-12-31", drop=("2022-06-15",))
 
     plan = plan_download(
-        "AAPL", "2024-01-02", "2024-12-31", existing, calendar=calendar,
+        "AAPL",
+        "2024-01-02",
+        "2024-12-31",
+        existing,
+        calendar=calendar,
         refresh_overlap_sessions=0,
     )
 
@@ -479,7 +542,3 @@ def test_merge_windows_keeps_windows_separated_by_a_present_session(calendar) ->
 
 def test_merge_windows_of_nothing_is_nothing(calendar) -> None:
     assert merge_windows([], sessions_in_range(calendar, "2024-01-02", "2024-01-05")) == []
-
-
-
-

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -40,10 +40,22 @@ def test_unknown_calendar_raises_a_domain_error() -> None:
 
 
 def test_calendar_bounds(calendar) -> None:
+    """The bounds are the calendar's own, not a date this file pinned.
+
+    ``exchange_calendars`` has moved the XNYS first session between releases
+    (2006-10-02 in some, 2006-10-30 in others), so asserting a literal date
+    tests the installed version instead of the code under test.
+    """
     first, last = calendar_bounds(calendar)
 
-    assert first == date(2006, 10, 2)
-    assert last > date(2026, 1, 1)
+    assert type(first) is date
+    assert type(last) is date
+    assert first < last
+    # both bounds really are sessions, and nothing precedes the first one
+    assert sessions_in_range(calendar, first, first) == [first]
+    assert sessions_in_range(calendar, last, last) == [last]
+    assert is_session(calendar, first) is True
+    assert is_session(calendar, first - timedelta(days=1)) is False
 
 
 @pytest.mark.parametrize("day", HOLIDAYS_2024)
@@ -83,20 +95,35 @@ def test_holidays_are_skipped_inside_a_week(calendar) -> None:
 
 
 def test_a_start_before_the_first_session_is_clamped_not_rejected(calendar) -> None:
-    sessions = sessions_in_range(calendar, "2006-01-01", "2006-12-31")
+    # The request starts before the calendar does and ends inside it; the window
+    # is intersected with the calendar, never rejected and never shifted.
+    first_session, _ = calendar_bounds(calendar)
+    requested_start = first_session - timedelta(days=30)
+    requested_end = first_session + timedelta(days=60)
 
-    assert sessions[0] == date(2006, 10, 2)
-    assert sessions[-1] == date(2006, 12, 29)
-    assert clamp_window(calendar, date(2006, 1, 1), date(2006, 12, 31)) == (
-        date(2006, 10, 2),
-        date(2006, 12, 31),
+    sessions = sessions_in_range(calendar, requested_start, requested_end)
+
+    assert sessions[0] == first_session
+    assert sessions == sorted(sessions)
+    assert sessions[-1] <= requested_end
+    assert clamp_window(calendar, requested_start, requested_end) == (
+        first_session,
+        requested_end,
     )
+    # a window that ends before the calendar begins holds no session at all
+    assert sessions_in_range(calendar, requested_start, requested_start) == []
+    assert clamp_window(calendar, requested_start, requested_start) is None
 
 
 def test_clamp_window_of_a_fully_out_of_range_request_is_none(calendar) -> None:
-    assert clamp_window(calendar, date(1990, 1, 1), date(1990, 12, 31)) is None
-    assert sessions_in_range(calendar, "1990-01-01", "1990-12-31") == []
-    assert last_sessions(calendar, date(1990, 6, 1), 5) == []
+    # Well before the calendar starts, whatever that start happens to be.
+    first_session, _ = calendar_bounds(calendar)
+    long_before = first_session - timedelta(days=3650)
+    still_before = first_session - timedelta(days=1200)
+
+    assert clamp_window(calendar, long_before, still_before) is None
+    assert sessions_in_range(calendar, long_before, still_before) == []
+    assert last_sessions(calendar, still_before, 5) == []
 
 
 def test_clamped_request_still_clamps_an_end_after_the_last_session(calendar) -> None:
@@ -139,10 +166,16 @@ def test_last_sessions_with_zero_or_negative_count_is_empty(calendar) -> None:
 
 
 def test_last_sessions_is_capped_by_the_calendar_start(calendar) -> None:
-    sessions = last_sessions(calendar, date(2006, 10, 3), 10)
+    # Anchored on the calendar's real opening sessions, so the look-back is
+    # capped by whatever the installed calendar actually starts at.
+    first_session, _ = calendar_bounds(calendar)
+    opening = sessions_in_range(calendar, first_session, first_session + timedelta(days=14))
+    second_session = next_session_after(opening, first_session)
+    assert second_session is not None
 
-    assert sessions[0] == date(2006, 10, 2)
-    assert len(sessions) == 2
+    # ten sessions are asked for, but the calendar holds two of them by then
+    assert last_sessions(calendar, first_session, 10) == [first_session]
+    assert last_sessions(calendar, second_session, 10) == [first_session, second_session]
 
 
 def test_next_session_after_crosses_the_weekend(calendar) -> None:

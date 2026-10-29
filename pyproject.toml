@@ -29,7 +29,15 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["data_sys", "data_sys.providers", "factor_sys", "factors"]
+packages = [
+    "data_sys",
+    "data_sys.providers",
+    "factor_sys",
+    "factors",
+    "strategy_sys",
+    "strategy_sys.strategies",
+    "strategy_sys.strategies.single_factor",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

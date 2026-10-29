@@ -8,7 +8,7 @@ down exactly *which* windows the incremental planner decided to download.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +18,7 @@ import pytest
 
 import data_sys.storage as storage
 from data_sys.errors import DataPipelineError, DownloadError
+from data_sys.market_calendar import DEFAULT_CALENDAR_NAME, calendar_bounds, get_calendar
 from data_sys.merge import date_set
 from data_sys.planner import STATUS_NO_SESSIONS, STATUS_UP_TO_DATE
 from data_sys.quality import validate_bars
@@ -86,8 +87,11 @@ def test_first_update_downloads_the_whole_requested_range(tmp_path: Path) -> Non
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
 
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     assert result.status == STATUS_SUCCESS
@@ -122,8 +126,11 @@ def test_first_update_metadata_records_the_incremental_fields(tmp_path: Path) ->
     provider = SessionFakeProvider(start="2024-01-02", end="2024-02-29")
 
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-02-29",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-02-29",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     records = _run_records(tmp_path)
@@ -155,15 +162,22 @@ def test_first_update_metadata_records_the_incremental_fields(tmp_path: Path) ->
 def test_second_update_only_downloads_the_tail_and_the_refresh_window(tmp_path: Path) -> None:
     first = SessionFakeProvider(start="2024-01-02", end="2024-06-28")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-06-28",
-        data_root=tmp_path, provider=first,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-06-28",
+        data_root=tmp_path,
+        provider=first,
     )
     before = _published(tmp_path)
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-07-05")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-07-05",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=5,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-07-05",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=5,
     )
 
     # 2024-07-04 is Independence Day, so the tail gap is 01/02/03/05 and the
@@ -189,15 +203,22 @@ def test_second_update_is_a_no_op_when_the_history_is_complete_and_refresh_is_of
 ) -> None:
     first = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=first,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=first,
     )
     before = _published(tmp_path)
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=0,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=0,
     )
 
     assert second.calls == []
@@ -222,15 +243,22 @@ def test_second_update_is_a_no_op_when_the_history_is_complete_and_refresh_is_of
 def test_a_complete_history_only_refreshes_the_last_sessions(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
     before = _published(tmp_path)
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=5,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=5,
     )
 
     # 2024-03-29 is Good Friday, so the last 5 sessions end on 03-28.
@@ -251,14 +279,21 @@ def test_a_complete_history_only_refreshes_the_last_sessions(tmp_path: Path) -> 
 def test_no_refresh_never_downloads_when_nothing_is_missing(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-06-28")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-06-28",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-06-28",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-06-28")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-06-28",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=0,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-06-28",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=0,
     )
 
     assert second.calls == []
@@ -269,14 +304,21 @@ def test_no_refresh_never_downloads_when_nothing_is_missing(tmp_path: Path) -> N
 def test_no_refresh_still_downloads_a_real_tail_gap(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-01-31")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-01-31",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-01-31",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-02-29")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-02-29",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=0,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-02-29",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=0,
     )
 
     assert second.windows() == [(date(2024, 2, 1), date(2024, 2, 29))]
@@ -296,8 +338,11 @@ def _rewrite_published(tmp_path: Path, frame: pd.DataFrame) -> None:
 def test_an_internal_hole_is_detected_and_filled(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     holed = _published(tmp_path)
@@ -307,8 +352,12 @@ def test_an_internal_hole_is_detected_and_filled(tmp_path: Path) -> None:
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=0,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=0,
     )
 
     assert second.windows() == [(date(2024, 2, 15), date(2024, 2, 16))]
@@ -321,8 +370,11 @@ def test_an_internal_hole_is_detected_and_filled(tmp_path: Path) -> None:
 def test_a_hole_before_the_request_is_left_alone(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2023-01-03", end="2024-03-29")
     update_symbol(
-        symbol="AAPL", start="2023-01-03", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2023-01-03",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
     holed = _published(tmp_path)
     holed = holed[holed["date"].dt.date != date(2023, 6, 15)].reset_index(drop=True)
@@ -331,8 +383,12 @@ def test_a_hole_before_the_request_is_left_alone(tmp_path: Path) -> None:
 
     second = SessionFakeProvider(start="2023-01-03", end="2024-03-29")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=0,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=0,
     )
 
     assert second.calls == []
@@ -342,15 +398,22 @@ def test_a_hole_before_the_request_is_left_alone(tmp_path: Path) -> None:
 def test_a_request_starting_before_the_local_history_backfills_the_head(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-12-31")
     update_symbol(
-        symbol="AAPL", start="2024-06-03", end="2024-12-31",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-06-03",
+        end="2024-12-31",
+        data_root=tmp_path,
+        provider=provider,
     )
     before = _published(tmp_path)
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-12-31")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-12-31",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=0,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-12-31",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=0,
     )
 
     assert second.windows() == [(date(2024, 1, 2), date(2024, 5, 31))]
@@ -365,15 +428,22 @@ def test_a_request_starting_before_the_local_history_backfills_the_head(tmp_path
 def test_the_requested_window_can_be_narrower_than_the_local_history(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-12-31")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-12-31",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-12-31",
+        data_root=tmp_path,
+        provider=provider,
     )
     before = _published(tmp_path)
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-12-31")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=0,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=0,
     )
 
     # nothing missing inside the narrow request, so nothing is downloaded and
@@ -384,18 +454,27 @@ def test_the_requested_window_can_be_narrower_than_the_local_history(tmp_path: P
 
 
 def test_a_request_before_the_calendar_start_is_clamped(tmp_path: Path) -> None:
-    provider = SessionFakeProvider(start="2006-10-02", end="2006-12-29")
+    # The calendar's real first session decides both the request and the clamp,
+    # so this holds whichever date the installed exchange_calendars starts at.
+    first_session, _ = calendar_bounds(get_calendar(DEFAULT_CALENDAR_NAME))
+    requested_start = first_session - timedelta(days=30)
+    requested_end = first_session + timedelta(days=60)
+    provider = SessionFakeProvider(start=requested_start.isoformat(), end=requested_end.isoformat())
 
     result = update_symbol(
-        symbol="AAPL", start="2006-01-01", end="2006-12-31",
-        data_root=tmp_path, provider=provider, refresh_overlap_sessions=0,
+        symbol="AAPL",
+        start=requested_start.isoformat(),
+        end=requested_end.isoformat(),
+        data_root=tmp_path,
+        provider=provider,
+        refresh_overlap_sessions=0,
     )
 
-    assert provider.windows() == [(date(2006, 10, 2), date(2006, 12, 31))]
+    assert provider.windows() == [(first_session, requested_end)]
     assert result.status == STATUS_SUCCESS
     record = _run_record(tmp_path, result.run_id)
-    assert record["requested_start"] == "2006-01-01"
-    assert record["plan"]["effective_start"] == "2006-10-02"
+    assert record["requested_start"] == requested_start.isoformat()
+    assert record["plan"]["effective_start"] == first_session.isoformat()
     assert any("clamped" in note for note in record["notes"])
 
 
@@ -407,16 +486,23 @@ def test_overlapping_rows_take_the_new_values_and_returns_are_recomputed(
 ) -> None:
     first = SessionFakeProvider(start="2024-01-02", end="2024-03-25", seed=11)
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-25",
-        data_root=tmp_path, provider=first,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-25",
+        data_root=tmp_path,
+        provider=first,
     )
     before = _published(tmp_path)
     boundary = date(2024, 3, 22)
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-03-25", seed=77)
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-25",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=2,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-25",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=2,
     )
 
     after = _published(tmp_path)
@@ -452,14 +538,20 @@ def test_overlapping_rows_take_the_new_values_and_returns_are_recomputed(
 def test_published_dollar_volume_is_always_close_times_volume(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     second = SessionFakeProvider(start="2024-01-02", end="2024-04-30", seed=42)
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-04-30",
-        data_root=tmp_path, provider=second,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-04-30",
+        data_root=tmp_path,
+        provider=second,
     )
 
     published = _published(tmp_path)
@@ -483,8 +575,11 @@ def _publish_once(tmp_path: Path, *, seed: int = 11) -> pd.DataFrame:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29", seed=seed)
     assert (
         update_symbol(
-            symbol="AAPL", start="2024-01-02", end="2024-03-29",
-            data_root=tmp_path, provider=provider,
+            symbol="AAPL",
+            start="2024-01-02",
+            end="2024-03-29",
+            data_root=tmp_path,
+            provider=provider,
         ).status
         == STATUS_SUCCESS
     )
@@ -496,8 +591,11 @@ def test_a_download_failure_keeps_the_published_dataset(tmp_path: Path) -> None:
 
     failing = SessionFakeProvider(error=DownloadError("simulated network outage"))
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-04-30",
-        data_root=tmp_path, provider=failing,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-04-30",
+        data_root=tmp_path,
+        provider=failing,
     )
 
     assert result.status == STATUS_FAILED
@@ -520,8 +618,11 @@ def test_a_quality_failure_keeps_the_published_dataset(tmp_path: Path) -> None:
         start="2024-01-02", end="2024-04-30", close_override={"2024-04-01": -5.0}
     )
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-04-30",
-        data_root=tmp_path, provider=bad,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-04-30",
+        data_root=tmp_path,
+        provider=bad,
     )
 
     assert result.status == STATUS_FAILED
@@ -554,8 +655,11 @@ def test_a_publish_failure_keeps_the_published_dataset(
 
     fresh = SessionFakeProvider(start="2024-01-02", end="2024-04-30", seed=99)
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-04-30",
-        data_root=tmp_path, provider=fresh,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-04-30",
+        data_root=tmp_path,
+        provider=fresh,
     )
 
     assert result.status == STATUS_FAILED
@@ -583,8 +687,11 @@ def test_a_failed_publish_confirmation_keeps_the_published_dataset(
 
     fresh = SessionFakeProvider(start="2024-01-02", end="2024-04-30", seed=99)
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-04-30",
-        data_root=tmp_path, provider=fresh,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-04-30",
+        data_root=tmp_path,
+        provider=fresh,
     )
 
     assert result.status == STATUS_FAILED
@@ -618,8 +725,11 @@ def test_a_failed_confirmation_of_a_first_publish_leaves_no_partition(
 
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     assert result.status == STATUS_FAILED
@@ -658,8 +768,11 @@ def test_a_staged_verification_failure_keeps_the_published_dataset(
 
     fresh = SessionFakeProvider(start="2024-01-02", end="2024-04-30", seed=99)
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-04-30",
-        data_root=tmp_path, provider=fresh,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-04-30",
+        data_root=tmp_path,
+        provider=fresh,
     )
 
     assert result.status == STATUS_FAILED
@@ -680,8 +793,11 @@ def test_an_unexpected_error_is_captured_as_a_failure(
 
     fresh = SessionFakeProvider(start="2024-01-02", end="2024-04-30", seed=99)
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-04-30",
-        data_root=tmp_path, provider=fresh,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-04-30",
+        data_root=tmp_path,
+        provider=fresh,
     )
 
     assert result.status == STATUS_FAILED
@@ -696,8 +812,11 @@ def test_a_request_with_no_session_is_skipped_without_downloading(tmp_path: Path
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
 
     result = update_symbol(
-        symbol="AAPL", start="2024-01-06", end="2024-01-07",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-06",
+        end="2024-01-07",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     assert result.status == STATUS_SKIPPED
@@ -717,8 +836,11 @@ def test_a_skipped_request_keeps_the_published_dataset(tmp_path: Path) -> None:
 
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
     result = update_symbol(
-        symbol="AAPL", start="2024-07-06", end="2024-07-07",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-07-06",
+        end="2024-07-07",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     assert result.status == STATUS_SKIPPED
@@ -731,8 +853,11 @@ def test_a_request_entirely_outside_the_calendar_is_skipped(tmp_path: Path) -> N
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
 
     result = update_symbol(
-        symbol="AAPL", start="1990-01-01", end="1990-12-31",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="1990-01-01",
+        end="1990-12-31",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     assert result.status == STATUS_SKIPPED
@@ -746,15 +871,22 @@ def test_a_request_entirely_outside_the_calendar_is_skipped(tmp_path: Path) -> N
 def test_every_window_gets_its_own_raw_file_and_sidecar(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-06-28")
     update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-06-28",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-06-28",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     # a tail gap plus a refresh window at a distance: two requests, two archives
     second = SessionFakeProvider(start="2024-01-02", end="2024-07-31")
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-07-31",
-        data_root=tmp_path, provider=second, refresh_overlap_sessions=3,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-07-31",
+        data_root=tmp_path,
+        provider=second,
+        refresh_overlap_sessions=3,
     )
 
     assert len(second.windows()) >= 1
@@ -774,8 +906,11 @@ def test_raw_file_names_carry_symbol_dates_and_run_id(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
 
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     name = Path(result.raw_paths[0]).name
@@ -786,9 +921,13 @@ def test_a_batch_membership_is_recorded(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
 
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
-        run_id="20240101T000000Z-abc123-AAPL", batch_run_id="20240101T000000Z-abc123",
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
+        run_id="20240101T000000Z-abc123-AAPL",
+        batch_run_id="20240101T000000Z-abc123",
     )
 
     assert result.run_id == "20240101T000000Z-abc123-AAPL"
@@ -801,8 +940,11 @@ def test_the_symbol_is_normalized_before_download(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
 
     result = update_symbol(
-        symbol="  aapl  ", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="  aapl  ",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     assert result.symbol == "AAPL"
@@ -815,8 +957,11 @@ def test_a_dotted_symbol_stays_canonical_outside_the_provider(tmp_path: Path) ->
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
 
     result = update_symbol(
-        symbol="brk.b", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="brk.b",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     assert result.symbol == "BRK.B"
@@ -847,8 +992,11 @@ def test_the_result_status_dict_is_json_serializable(tmp_path: Path) -> None:
     provider = SessionFakeProvider(start="2024-01-02", end="2024-03-29")
 
     result = update_symbol(
-        symbol="AAPL", start="2024-01-02", end="2024-03-29",
-        data_root=tmp_path, provider=provider,
+        symbol="AAPL",
+        start="2024-01-02",
+        end="2024-03-29",
+        data_root=tmp_path,
+        provider=provider,
     )
 
     payload = result.to_status_dict()
@@ -869,9 +1017,3 @@ def test_the_result_status_dict_is_json_serializable(tmp_path: Path) -> None:
         "failure_reason",
     ):
         assert key in payload, key
-
-
-
-
-
-

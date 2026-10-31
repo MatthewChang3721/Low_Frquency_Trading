@@ -31,9 +31,10 @@ rules.  A momentum rule is just this class with the momentum factor::
 
     TopNByFactorStrategy(FactorRequirement("momentum_12_1", "1.0.0"), top_n=10)
 
-Not implemented yet, on purpose: a strategy registry, a strategy runner, a CLI,
-result storage, multi-factor blends, portfolio construction, orders, fills and a
-backtest.
+Not implemented here, on purpose: a registry instance or a runner (both live at
+the package root and are built by the caller), a command line
+(``scripts/run_strategy.py`` builds one table per invocation), result storage,
+multi-factor blends, portfolio construction, orders, fills and a backtest.
 
 Examples
 --------

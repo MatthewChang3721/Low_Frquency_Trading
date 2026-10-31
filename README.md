@@ -339,6 +339,7 @@ invalid universe configuration in 'config/universe_seed.csv'
 | `factor_sys/factor_schedule.py` | 多日期研究的**纯日期规则**：`decision_schedule()` / `select_decision_dates()` 按 weekly / biweekly / monthly + anchor 从交易日历里选出决策日（节假日回退、双周相位、月末）；不读行情、不算因子、不写文件，也不依赖 Store / Runner |
 | `scripts/run_factor_batch.py` | 批量编排入口：日期规则 → 逐日调用 `run_factor()`（复用同一份 Panel 缓存）→ 单日失败隔离 → 每个日期一行状态 + 汇总 → 在 `factors/batch_runs/` 写一份 manifest（临时文件 + 原子替换） |
 | `scripts/analyze_factor.py` | 多日期研究分析入口：调用上面的批量入口取得**本次日程**的 Panel → 逐期用 `ForwardReturnCalculator` 计算未来收益标签 → 复用 `QuickAnalyzer` / `ICAnalyzer` / `QuantileAnalyzer` 三种既有分析 → 在 `factors/research_runs/` 发布一份独立研究报告（metadata + 5 张 CSV，临时目录 + 一次原子重命名）；不重算公式、不扫 Panel 目录、不做策略或回测 |
+| `scripts/run_strategy.py` | 单日策略入口：参数 → `FactorRequirement` → 本次调用新建的 `StrategyRegistry`（显式注册一个 factory）→ `registry.create(完整 StrategySpec)` → `StaticUniverseProvider` + `ParquetFactorStore` → `StrategyRunner.run()` → 打印策略/版本/决策日/股票池大小/入选数与入选清单；只读已存 Panel，不重算因子、不落盘结果、不产生权重或订单 |
 
 分层依赖是单向的：`data_query` / `batch_query` → `update` → `planner` / `merge` / `storage` / `duckdb_verify` / `metadata` → `standardize` / `quality` / `market_calendar` → `schema` / `config` / `utils`；`summary` 只依赖 `storage`（因此这一层完全没有 DuckDB）。`storage` 与 `providers` 互不感知。`universe` 是独立于行情管道的一层（只依赖 `schema`/`config`/`errors`），由 `batch_query` 消费，行情管道本身不依赖它，因此两者可各自演进。
 
@@ -694,10 +695,104 @@ batch_manifest_path: data/factors/batch_runs/20240102T030405Z_bf1eb3.json
 6. **距离未来回测仍缺**：策略信号与组合构建、开盘成交、交易成本与滑点、换手与流动性约束、资金与仓位管理——本报告只是研究统计。
 7. **尾部数据不足不是错误**：接近数据末端的日期会因为未来价格尚未发布而得到全部或部分 `is_available=False` 标签，这些日期照常保留（`pair_coverage` 为 0 或偏低、`ic` 为空），既不填零、不插值、也不用最近价格替代。
 
-## 11. 测试
+## 11. 运行一个单日策略（Top N）
+
+策略层的**最小真实入口**：给出「因子名 + 精确因子版本 + Top N + 决策日」，读取因子系统**已经落盘**的 Panel，用 `TopNByFactorStrategy` 选出该决策日的入选标的，并把来源信息与入选清单打印出来。它不重算任何因子、不写任何 Panel，也不产生权重或订单。
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest            # 全部 1986 项（含 5 条既有 exchange_calendars 基线失败，见 §12）
+# 1) 先让因子系统把决策日的 Panel 落盘（已存在则命中缓存，不重算）：
+python scripts/run_factor.py `
+  --factor momentum_12_1 `
+  --as-of 2025-12-24
+
+# 2) 再运行单日策略（只读上面那个 Panel）：
+python scripts/run_strategy.py `
+  --factor momentum_12_1 `
+  --factor-version 1.0.0 `
+  --top-n 10 `
+  --as-of 2025-12-24
+```
+
+可选参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `--factor NAME` | 必填。策略排序所用的因子名，例如 `momentum_12_1` |
+| `--factor-version VERSION` | **必填**。要读取的**精确**因子版本，例如 `1.0.0`；刻意没有默认值，否则无法判断结果来自哪一版 Panel |
+| `--top-n N` | 必填。入选标的数量，正整数；`0` / 负数由策略规则拒绝，`abc` / `1.5` 由 argparse 拒绝 |
+| `--as-of YYYY-MM-DD` | 必填。决策日，只接受纯 ISO 日期，**原样**交给 `StrategyRunner` |
+| `--strategy-version VERSION` | 可选，默认 `1.0.0`；写进策略身份与结果每一行 |
+| `--data-root PATH` | 可选。Panel 读取根目录 `<PATH>/factors/panels`；默认 `PipelineConfig().data_root` |
+| `--universe-path PATH` | 可选。静态股票池 CSV；默认 `config/universe_seed.csv` |
+
+固定调用顺序（每一步都只走该层已有的公开接口：脚本不实现选股规则、不打开 Parquet、不手工构造 `StrategyContext`）：
+
+```text
+FactorRequirement(factor_name, factor_version)
+→ TopNByFactorStrategy(requirement, top_n, version=strategy_version)
+→ 本次调用新建的 StrategyRegistry().register(factory) → create(完整 StrategySpec)
+→ StaticUniverseProvider(universe_path) + ParquetFactorStore(<data_root>/factors/panels)
+→ StrategyRunner(...).run(strategy, as_of_date)
+→ StrategyResult（已校验策略、日期、股票池与因子版本来源）
+→ 打印元数据 + 入选表
+```
+
+`StrategyRegistry` 仍然**没有全局实例、也不会自动注册**：命令行只是一个明确的调用方，为这一次运行建表、注册一个能重建同一条规则的 factory，并运行 `create()` 返回的实例——不是注册时那次校验用的实例。
+
+上面那条命令在 `2025-12-24` 上的真实输出（股票池 20 只、`--top-n 10`；字段与表头顺序固定）：
+
+```text
+strategy_name: top_10_by_momentum_12_1
+strategy_version: 1.0.0
+as_of_date: 2025-12-24
+universe_size: 20
+selected_count: 10
+required_factor: momentum_12_1/1.0.0
+selection:
+rank  symbol  score
+1     AVGO    0.728642
+2     GOOGL   0.669811
+3     JNJ     0.460632
+4     LLY     0.404270
+5     NVDA    0.355529
+6     JPM     0.280759
+7     WMT     0.136626
+8     XOM     0.135603
+9     BRK.B   0.120499
+10    MSFT    0.093671
+```
+
+只有 `is_selected=True` 的行会被列出，按 `rank` 升序，`score` 固定 6 位小数；`StrategyResult` 内部仍然是「一行一只标的、按股票池顺序」，脚本不会改动它的顺序或数据，也不会打印 DataFrame 的 index。
+
+需要知道的几点：
+
+1. **只读已存的 Panel**：命令读取 `<data-root>/factors/panels` 下**已落盘**的截面，**不联网、不下载、不重算因子、不写任何 Panel**；缺少对应日期的 Panel 时直接失败（退出码 `1`）。
+2. **`--factor-version` 是强制要求**：因子名 + 精确版本共同构成策略的 `FactorRequirement`，也构成 `StrategySpec` 的一部分。同一个因子名换一个版本就是**另一个策略身份**，命令只会读指定的版本，也不会因为目录里存在别的版本而"猜"一个。
+3. **日期不会被悄悄调整**：`--as-of` 原样传给 `StrategyRunner`。不会自动调整到相邻交易日。通常非交易日没有对应 Panel，会以“Panel 缺失”失败；若某日期已有有效 Panel，则策略层将其作为决策日期标签运行。
+4. **缺失 Panel 时先算因子**：先运行 §8 的单日因子命令（或 §9 的批量命令）把该决策日的 Panel 落盘，再运行本命令。例如：
+
+   ```powershell
+   python scripts/run_factor.py --factor momentum_12_1 --as-of 2025-12-24
+   python scripts/run_strategy.py --factor momentum_12_1 --factor-version 1.0.0 --top-n 10 --as-of 2025-12-24
+   ```
+
+5. **空选择不是错误**：没有可排名标的（例如全部不合格）时，`selected_count: 0`、表头照常打印，并在表头下输出 `none`，退出码仍是 `0`。
+6. **退出码**：`0` 表示策略成功运行（含空选择）；`1` 表示领域或运行错误（非法策略参数、Panel 缺失或损坏、股票池不可读、Runner / 策略 / 注册表失败、空白路径等），stderr 一行 `error: ...`（收集到多个问题时按项目风格逐条 `- ` 列出，但**不打印 traceback**）；`2` 由 argparse 给出（缺参数、未知参数、`--top-n` 不是整数）。
+7. **`StrategyResult` 是中间结果，目前不持久化**：本命令只把它渲染成文本，不写 CSV / Parquet，也没有读取端；`run_strategy(...)` 返回的 `StrategyRunOutcome` 是内存对象，可在 Notebook 里直接检查（`result`、`selected_count`、`factor_requirements`、`data_root`，以及按 rank 排好的 `selections`）。
+8. **这不是回测**：输出只是「决策日的入选清单」，不等于实际仓位、目标权重、订单、成交或回测收益；`StaticUniverseProvider` 用的是静态股票池，仍然带有幸存者偏差。
+
+### 策略、策略版本与因子版本如何随结果流动
+
+- 命令行参数直接变成策略身份：`StrategySpec(name="top_10_by_momentum_12_1", version="1.0.0", required_factors=(FactorRequirement("momentum_12_1", "1.0.0"),))`。
+- `StrategyRunner` 按 `required_factors` 逐个调用 `FactorStore.read(name, version, as_of_date)`，再把策略返回的结果与**本次运行**核对：策略 spec、决策日、股票池（**对象身份**，不只是相同的代码列表）以及因子要求，任何一项不符都会失败而不是被记录下来。
+- `StrategyResult` 每一行都带 `strategy_name` / `strategy_version`，结果对象本身带完整 `strategy_spec` 与 `factor_requirements`；`StrategyRunOutcome` 原样携带它们，所以打印出来的清单永远能回溯到「哪条规则、哪个策略版本、读了哪个因子版本、哪一天、哪个数据根目录」。
+
+本入口刻意**不包含**：批量策略调度与调仓日历、`StrategyResult` 持久化、组合构建与目标权重、现金与换手约束、下单与成交、交易成本与滑点、回测与收益曲线。这些都建在这次得到的 `StrategyResult` 之上。
+
+## 12. 测试
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest            # 全部 2434 项
 .\.venv\Scripts\python.exe -m pytest -v         # 逐项
 .\.venv\Scripts\python.exe -m ruff check .      # 静态检查
 ```
@@ -717,8 +812,9 @@ batch_manifest_path: data/factors/batch_runs/20240102T030405Z_bf1eb3.json
 - `test_factor_schedule.py` — 日期规则（纯日历，无文件）：weekly 的 anchor 与「节假日回退到前一个交易日」、WED 与 THU 得到不同序列、候选落在区间外时被丢弃、biweekly 每隔一周且相位稳定、monthly 取每月最后一个交易日（3/6/8/11 月都提前一天）、跨年与月末边界；不变量（升序、无重复、全为会话、全在区间内）；各类非法输入（倒序区间、`datetime`、非严格 ISO、未知频率 / weekday / 日历、monthly 带 anchor）；手工构造的 `DecisionSchedule` 自校验（周末 `2024-01-06 (SAT)`、节假日 `2024-01-01 (MON)`、日历未覆盖的 1990 年、未知日历、超过 5 个非法日期的截断提示、空选择合法，其余字段矛盾仍被拒绝）；**架构守卫**（只允许 stdlib 与 `data_sys.market_calendar`，不 import pandas / PyArrow / DuckDB / Store / Runner / `factors` / `scripts`，不打开任何文件）；
 - `test_run_factor_batch.py` — 批量入口：受控替身验证**每个选中日期只调用一次既有 `run_factor()`**、参数（因子 / 根目录 / 股票池 / 日历 / `force`）原样传递、`hit/miss/forced` 计数、单个日期失败后继续且顺序稳定、质量报告不算失败、未知因子 / 未知日历 / 空白 `--data-root` 在循环前失败；**每个选中日期恰好对应一条结果或一条失败**（缺口对象在构造时被拒绝、`format_summary()` 不会 `KeyError`、成功与失败混排仍能正常渲染）；manifest 字段与顺序、相对路径、空选择、两次运行两份独立 manifest、原子写失败不损坏旧文件且退出码为 `1`；真实 Parquet 端到端（`miss` → `hit` 文件字节不变、`--force` 全量重算、损坏的 Panel 只影响它自己那一天）；CLI 输出、退出码、argparse 的 `2`、从项目根目录真实进程运行；**架构守卫**（不 import 公式 / 网络 / 子进程，不重算 Panel 路径，只调用单日入口与日期规则）。
 - `test_analyze_factor.py` — 多日期研究分析入口：受控替身验证**只调用既有 `run_factor_batch()`**（因子 / 区间 / 频率 / anchor / 根目录 / 股票池 / 日历 / `force` 原样传递）、只用本次 batch 的 Panel（目录里无关的 Panel 不会被读取、也不会被改写）、每个 Panel **恰好调用一次** `ForwardReturnCalculator.compute(panel, horizon)`、三种分析拿到同一组 panels / labels；真实 Parquet 端到端（`miss` → `hit` 文件字节不变、`--force` 全量重算、损坏的 Panel 使整次分析被拒绝且不写报告）；`weekly + THU + 20`（WED 与 THU 选到不同日期、biweekly 隔周、monthly 月末与无 anchor、monthly 带 anchor 退出码 `2`）、非法 horizon / quantiles / min-pairs（argparse 与函数两条路径）、空日程与失败日期（错误含失败数与 batch manifest 路径）、尾部行情不足的日期仍保留在报告中（`pair_coverage = 0`、`ic` 为空，不填零不删除）；报告的六份文件、列与既有 `to_frame()` 一致、metadata 的 `null`（不写 `NaN` / `Infinity`）与相对清单路径、两次运行两份独立报告、写入失败不留半成品目录且不影响 Panel 与 manifest；CLI 摘要顺序 / 退出码 / 单行 `error:` 风格、从项目根目录真实进程运行；**batch 对账**（结果对象在构造时核对 `selected_dates`、各期成功 outcome 的日期、`factor_panels` 的日期与**对象身份**：同日期同版本的重建 Panel、另一份 batch 的 Panel、缺一期的 Panel、被改名的 batch 都被拒绝，而真实运行的 Panel 与 batch 里的 Panel 是同一批对象）；**架构守卫**（不 import 公式 / 网络 / 子进程 / Store，不重算 Spearman 或分位分组，只构造报告路径）。
+- `test_run_strategy.py` — 单日策略入口（真实临时 Parquet Panel + 临时股票池）：端到端验证**运行的是 `registry.create()` 返回的实例**（Runner 收到的就是它，结果对象也是 Runner 返回的那一个）、排名的分数 / 名次用独立 `sorted` 对照、`--as-of` 原样传给 Runner；规则语义（降序、平分按 symbol 升序、`top_n` 大于股票池、全部不合格时 `selected_count = 0` 仍成功退出）；精确版本（同一因子名两个版本并存，`read` 只被调用于被请求的版本，输出与 `factor_requirements` 都指向它，Panel 字节不变）；失败路径（Panel 缺失 / 日期无 Panel / 周末 / `--top-n 0` 与负数 / 非法日期 / 空白参数：退出码 `1`、stderr 首行 `error: ...`、无 traceback、不创建目录；`--top-n abc`、缺参数、未知参数：argparse 的 `2`）；`--data-root` 与 `--universe-path` 的实际作用范围；输出契约（整段文本、字段顺序、6 位小数、只含入选行、无 index / `dtype` / `NaN`、每条 `required_factor`）；`StrategyRunOutcome` 的不可变、自洽校验（`selected_count` 与 frame 不符、因子要求不是结果自己的、`data_root` 不是 Path 等一律拒绝）与 frame 隔离；离线边界（socket / `FactorRunner.run` / `write` 全部被禁用仍成功，`data_root` 下只有 Panel 目录）；**AST 守卫**（只 import 三层公开接口、不 import pandas / pyarrow / DuckDB / 网络 / `factors`、不引用 Store 或 Registry 私有成员、不拼 Hive 路径、没有算术形式的选股规则、没有权重 / 订单 / 回测命名）；从项目根目录真实进程运行。
 
-## 12. 已知限制与后续
+## 13. 已知限制与后续
 
 **本 MVP 明确不包含**（属于设计文档后续阶段）：
 
@@ -727,7 +823,7 @@ batch_manifest_path: data/factors/batch_runs/20240102T030405Z_bf1eb3.json
 - 证券主数据只覆盖股票池所需的 5 个字段：无 CIK、无退市历史、无 ticker 历史映射；
 - `UniverseSnapshot` 的完整筛选规则（`dollar_volume` 等字段已就绪，筛选逻辑待在股票池模块实现）；
 - `scripts/download_data.py` 的 Google Drive 整包同步（设计文档 §7）；
-- 因子层的**策略与回测**：§10 只做研究统计（Panel + 复权收盘标签 + IC + 分位收益），策略信号、组合构建、开盘成交、成本与滑点、换手与流动性约束、资金与仓位管理都还没有；manifest 也仍然没有读取端；
+- 因子层的**策略与回测**：§10 只做研究统计（Panel + 复权收盘标签 + IC + 分位收益），§11 只做**单日入选清单**；批量策略调度、`StrategyResult` 持久化、组合构建（目标权重、现金、换手与流动性约束）、开盘成交、成本与滑点、回测收益都还没有；manifest 也仍然没有读取端；
 
 **需要注意的行为**：
 
@@ -737,5 +833,5 @@ batch_manifest_path: data/factors/batch_runs/20240102T030405Z_bf1eb3.json
 - Yahoo Finance 的数据许可限制见设计文档 §7.4：**在把数据再分发给协作者之前必须复核条款**，必要时改用有明确再分发许可的数据源。
 - 标准化层不做交易日补齐（缺失交易日不会生成空行），因此 `date` 的严格递增校验是「单调」而非「连续」。
 - 含点号的代码在 Yahoo 那边写作连字符（`BRK.B` → `BRK-B`）：provider **先按项目规范拼写请求**，只在返回空行或缺必需列时才回退到连字符拼写——规范拼写永远优先，`RY.TO` 这类交易所后缀不会被误改。代价是 `BRK.B` 每次更新会多出一次试探性请求（日志会写明 `resolved to the vendor ticker`）。文件名、标准化数据、Hive 分区与运行元数据里始终是 `BRK.B`，只有 sidecar 的 `vendor_symbol` 记录回退后的拼写。
-- **测试基线**：当前环境安装的 `exchange_calendars` 把 `XNYS` 的首个会话定在 2006-10-26（项目文档与早期断言写作 2006-10-02），因此 `test_market_calendar.py` / `test_planner.py` / `test_update.py` 里有 5 条与此相关的既有失败。它们只涉及日历下界，与因子层无关，本次未修改。
+- **测试基线**：`XNYS` 的首个会话由当前安装的 `exchange_calendars` 决定（本环境为 2006-10-26，项目早期文档写作 2006-10-02），测试不对该下界硬编码；日历只影响行情窗口与日期规则，与策略层无关。
 - 因子层的缓存仍然**没有血缘**：`scripts/run_factor_batch.py` 只是逐日调用单日入口，所以批量运行同样看不到「行情 / 股票池 / 代码变过」，需要时用 `--force` 或升级 `factor_version`。

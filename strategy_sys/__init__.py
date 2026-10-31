@@ -55,12 +55,14 @@ in the caller, keyed by the complete ``StrategySpec`` (name, version *and* the
 exact factor versions).  :class:`StrategyRunner` then runs one of those
 strategies for one date; it never chooses which.
 
-What this package deliberately does **not** contain: a CLI, a default strategy
-configuration, batch scheduling or any notion of a frequency, result storage,
-portfolio construction, orders, fills or a backtest.  A strategy scores and
-selects, the runner runs one of them for one decision date, and what that
-selection is worth -- weighting, trading, measuring -- comes later, on top of the
-objects defined here.
+What this package deliberately does **not** contain: a command-line entry point,
+a default strategy configuration, batch scheduling or any notion of a frequency,
+result storage, portfolio construction, orders, fills or a backtest.  A strategy
+scores and selects, the runner runs one of them for one decision date, and what
+that selection is worth -- weighting, trading, measuring -- comes later, on top of
+the objects defined here.  Driving one run from the shell is a script's job:
+``scripts/run_strategy.py`` builds its own ``StrategyRegistry`` for a single
+invocation and hands the ``create``-built strategy to a ``StrategyRunner``.
 
 Examples
 --------

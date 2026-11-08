@@ -1318,13 +1318,14 @@ def test_the_contract_is_exported_from_the_package_root() -> None:
     assert portfolio_sys.CONSTRUCTION_NAME_PATTERN == CONSTRUCTION_NAME_PATTERN
 
 
-def test_the_package_ships_no_rule_no_registry_and_no_runner() -> None:
+def test_the_package_ships_no_rule_no_default_table_and_no_runner() -> None:
     for absent in (
         "EqualWeightConstructor",
         "ScoreWeightedConstructor",
         "VolatilityWeightedConstructor",
         "OptimizerConstructor",
         "PortfolioRegistry",
+        "default_portfolio_registry",
         "PortfolioRunner",
         "run_portfolio",
         "load_targets",
@@ -1333,29 +1334,35 @@ def test_the_package_ships_no_rule_no_registry_and_no_runner() -> None:
         assert not hasattr(portfolio_sys, absent), absent
 
     imported = {name for name in sys.modules if name.startswith("portfolio_sys.")}
-    # A weighting rule now exists one level down, so it may appear here -- but only
-    # because a *caller* imported it by name, never because the contract layer
-    # pulled it in: the root's own imports are pinned on the next line.
+    # A weighting rule and the registry now exist, so they may appear here -- but only
+    # because a *caller* imported the rule, never because a module pulled a concrete
+    # rule in: the root's own imports are pinned on the next line.
     assert imported <= {
         "portfolio_sys.constructors",
         "portfolio_sys.constructors.capped_score_weighted",
         "portfolio_sys.contracts",
         "portfolio_sys.errors",
+        "portfolio_sys.registry",
+        "portfolio_sys.transition",
     }, imported
     assert imported_modules(Path(portfolio_sys.__file__)) == {
         "__future__",
         "portfolio_sys.contracts",
         "portfolio_sys.errors",
+        "portfolio_sys.registry",
+        "portfolio_sys.transition",
     }
 
 
-def test_the_package_is_made_of_the_three_contract_modules() -> None:
+def test_the_package_is_made_of_the_contract_the_registry_and_the_errors() -> None:
     package = Path(portfolio_sys.__file__).parent
 
     assert sorted(path.name for path in package.glob("*.py")) == [
         "__init__.py",
         "contracts.py",
         "errors.py",
+        "registry.py",
+        "transition.py",
     ]
 
 
@@ -1377,6 +1384,8 @@ ALLOWED_IMPORTS: frozenset[str] = frozenset(
         "factor_sys.universe",
         "portfolio_sys.contracts",
         "portfolio_sys.errors",
+        "portfolio_sys.registry",
+        "portfolio_sys.transition",
         "strategy_sys.contracts",
     }
 )

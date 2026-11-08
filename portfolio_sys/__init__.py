@@ -35,10 +35,18 @@ construction is validated the same way before anything is traded.
     strategy result, rule identity and constraints they came from
 ``PortfolioConstructor``
     the abstract construction interface
-``PortfolioError`` / ``PortfolioContractError`` / ``PortfolioConstructionError``
-    the portfolio layer's own exception hierarchy: every contract problem
-    collected in one error, and a construction that a legal input cannot satisfy
-    reported as its own type
+``PortfolioConstructorRegistry``
+    the explicit ``PortfolioConstructionSpec -> factory`` table: a caller registers
+    the rules it means to run and asks for a fresh constructor by complete spec
+``PortfolioWeightChange`` / ``PortfolioTransition`` / ``build_portfolio_transition``
+    the difference between what the account holds and what a target asks for: one row
+    per symbol -- entered, exited, increased, decreased or unchanged -- plus the cash
+    change and a one-sided turnover, built from a state and a target
+``PortfolioError`` / ``PortfolioContractError`` / ``PortfolioConstructionError`` /
+``PortfolioRegistryError``
+    the portfolio layer's own exception hierarchy: every contract problem collected in
+    one error, a construction that a legal input cannot satisfy reported as its own
+    type, and a registration or a lookup the table cannot honour reported as a third
 
 Three statements, never confused:
 
@@ -51,13 +59,28 @@ turning weights into orders belongs to the execution layer.  Cash is a field
 (``cash_weight``), never a ``"CASH"`` position, and long-only is a property of
 the objects rather than a flag -- every stock weight is strictly positive.
 
+A ``PortfolioTransition`` is not a fourth statement about the account: it is the
+*difference* between two of them, a ``PortfolioState`` and a ``TargetPortfolio``.  One
+row per symbol of the union says what is entered, exited, increased, decreased or left
+untouched, plus the cash change and a one-sided ``turnover``, and it still carries no
+share count, no price, no fill and no cost -- it is what an execution or backtest layer
+would read, not what it would trade.
+
 What this package deliberately does **not** contain: an equal-weight rule, a
-volatility-weighted rule, an optimizer, a constructor registry, a runner, a
-command-line entry point, batch scheduling, a rebalance calendar, persistence of
-any kind, the trade list that turns a current state into a target, orders, fills,
-costs or a backtest.  Adding a rule is a new :class:`PortfolioConstructor`
-subclass with its own :class:`PortfolioConstructionSpec`; it never changes the
-objects here.
+volatility-weighted rule, an optimizer, a runner, a command-line entry point, batch
+scheduling, a rebalance calendar, persistence of any kind, the trade list that turns a
+current state into a target, orders, fills, costs or a backtest.  The weight
+*difference* between a state and a target does exist
+(``build_portfolio_transition``); the share counts, the prices and the fills do not.
+Adding a rule is a new :class:`PortfolioConstructor` subclass with its own
+:class:`PortfolioConstructionSpec`; it never changes the objects here.
+
+The registry is explicit and has no default: :class:`PortfolioConstructorRegistry` is
+an empty table until a caller registers a factory, nothing is registered at import
+time, and there is no "the registered constructor".  The version of a rule is part of
+its registered identity (``capped_score_weighted / 1.0.0`` and ``/ 2.0.0`` are two
+rules); the cash share and the single-name cap are not -- they are this run's
+:class:`PortfolioConstraints`, read by ``construct()`` through the context.
 
 The contract and the rules are kept apart, the way :mod:`strategy_sys` keeps its
 contract at the root and its strategies in :mod:`strategy_sys.strategies`: the
@@ -97,6 +120,13 @@ from portfolio_sys.errors import (
     PortfolioConstructionError,
     PortfolioContractError,
     PortfolioError,
+    PortfolioRegistryError,
+)
+from portfolio_sys.registry import PortfolioConstructorRegistry
+from portfolio_sys.transition import (
+    PortfolioTransition,
+    PortfolioWeightChange,
+    build_portfolio_transition,
 )
 
 __version__ = "0.1.0"
@@ -108,11 +138,16 @@ __all__ = [
     "PortfolioConstructionError",
     "PortfolioConstructionSpec",
     "PortfolioConstructor",
+    "PortfolioConstructorRegistry",
     "PortfolioContext",
     "PortfolioContractError",
     "PortfolioError",
     "PortfolioPosition",
+    "PortfolioRegistryError",
     "PortfolioState",
+    "PortfolioTransition",
+    "PortfolioWeightChange",
     "TargetPortfolio",
+    "build_portfolio_transition",
     "__version__",
 ]

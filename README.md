@@ -340,9 +340,10 @@ invalid universe configuration in 'config/universe_seed.csv'
 | `scripts/run_factor_batch.py` | 批量编排入口：日期规则 → 逐日调用 `run_factor()`（复用同一份 Panel 缓存）→ 单日失败隔离 → 每个日期一行状态 + 汇总 → 在 `factors/batch_runs/` 写一份 manifest（临时文件 + 原子替换） |
 | `scripts/analyze_factor.py` | 多日期研究分析入口：调用上面的批量入口取得**本次日程**的 Panel → 逐期用 `ForwardReturnCalculator` 计算未来收益标签 → 复用 `QuickAnalyzer` / `ICAnalyzer` / `QuantileAnalyzer` 三种既有分析 → 在 `factors/research_runs/` 发布一份独立研究报告（metadata + 5 张 CSV，临时目录 + 一次原子重命名）；不重算公式、不扫 Panel 目录、不做策略或回测 |
 | `scripts/run_strategy.py` | 单日策略入口：参数 → `FactorRequirement` → 本次调用新建的 `StrategyRegistry`（显式注册一个 factory）→ `registry.create(完整 StrategySpec)` → `StaticUniverseProvider` + `ParquetFactorStore` → `StrategyRunner.run()` → 打印策略/版本/决策日/股票池大小/入选数与入选清单；只读已存 Panel，不重算因子、不落盘结果、不产生权重或订单 |
-| `portfolio_sys/` | 组合层**数据契约**（只有权重，没有股数、价格、订单、成本、收益）：`PortfolioPosition`（一个非现金持仓）/ `PortfolioState`（调仓前**实际持有**什么）/ `TargetPortfolio`（构建器希望调仓后持有多少权重，携带来源 `StrategyResult` 的策略与精确因子版本）/ `PortfolioConstraints`（现金比例与单票上限）/ `PortfolioConstructionSpec`（构建规则名 + 版本）/ `PortfolioContext`（一次构建可读的全部输入）/ `PortfolioConstructor`（抽象接口）/ `CappedScoreWeightedConstructor`（`portfolio_sys/constructors/`：把入选股票按正 score 比例分配可投资权重，超过单票上限的部分递归再分配给未封顶股票；只输出目标权重，不产生订单或回测收益，尚无等权构建器、注册表或 CLI）；长仓由对象形状保证，现金是独立字段而非 `"CASH"` 代码；不读写文件、不读 Panel、不跑策略、不含 CLI |
+| `scripts/run_portfolio.py` | 单日组合入口：参数 → `run_strategy()`（策略入口，只读已存 Panel）→ `StrategyResult` → `PortfolioState`（`--initial-cash` 或手工 `--current-*`）→ `PortfolioConstraints` → 本次调用新建的 `PortfolioConstructorRegistry`（显式注册 `CappedScoreWeightedConstructor`）→ `registry.create(完整 PortfolioConstructionSpec)` → `construct()` → `TargetPortfolio` → `build_portfolio_transition()` → 打印目标权重与**纯权重差异**（entry / exit / 加仓 / 减仓 / 不变 + 现金 + 单边 `turnover`）；不重算因子、不写 Panel、不保存任何结果或账户状态、不产生订单 |
+| `portfolio_sys/` | 组合层**数据契约**（只有权重，没有股数、价格、订单、成本、收益）：`PortfolioPosition`（一个非现金持仓）/ `PortfolioState`（调仓前**实际持有**什么）/ `TargetPortfolio`（构建器希望调仓后持有多少权重，携带来源 `StrategyResult` 的策略与精确因子版本）/ `PortfolioConstraints`（现金比例与单票上限）/ `PortfolioConstructionSpec`（构建规则名 + 版本）/ `PortfolioContext`（一次构建可读的全部输入）/ `PortfolioConstructor`（抽象接口）/ `PortfolioConstructorRegistry`（`portfolio_sys/registry.py`：显式的「完整 spec → factory」表，`create(完整 spec)` 每次都返回新建的构建器实例；无默认实例、不自动注册任何规则、无全局 registry；版本属于 registry 身份，`cash_weight` / `max_single_weight` 属于 `PortfolioContext.constraints`，不属于 key）/ `CappedScoreWeightedConstructor`（`portfolio_sys/constructors/`：把入选股票按正 score 比例分配可投资权重，超过单票上限的部分递归再分配给未封顶股票；只输出目标权重，不产生订单或回测收益，尚无等权构建器，单日入口见 scripts/run_portfolio.py）/ `PortfolioWeightChange` / `PortfolioTransition` / `build_portfolio_transition`（`portfolio_sys/transition.py`：**当前权重 → 目标权重**的完整差异描述 —— 每个 symbol 恰好一行，区分 entry / exit / 加仓 / 减仓 / 不变，顺序固定为先按目标持仓原始顺序、再按当前组合顺序追加清仓标的；附带现金变化与单边权重换手 `turnover = 0.5 × (Σ|权重变化| + |现金变化|)`，纯股票互换只计一次单边，不会把 100% 换成 200%；它是"决策差异"，不是订单、不是成交、也不是回测结果）；长仓由对象形状保证，现金是独立字段而非 `"CASH"` 代码；不读写文件、不读 Panel、不跑策略、不含 CLI |
 
-分层依赖是单向的：`data_query` / `batch_query` → `update` → `planner` / `merge` / `storage` / `duckdb_verify` / `metadata` → `standardize` / `quality` / `market_calendar` → `schema` / `config` / `utils`；`summary` 只依赖 `storage`（因此这一层完全没有 DuckDB）。`storage` 与 `providers` 互不感知。`universe` 是独立于行情管道的一层（只依赖 `schema`/`config`/`errors`），由 `batch_query` 消费，行情管道本身不依赖它，因此两者可各自演进。`portfolio_sys` 位于 `strategy_sys` 之上，只依赖 `strategy_sys.contracts`、`factor_sys.universe` 与 `data_sys.schema` 里的 ticker 常量（项目唯一真源），不依赖任何读文件、行情、网络或存储模块；`portfolio_sys/constructors/` 这一子包同样只依赖 `portfolio_sys.contracts` / `portfolio_sys.errors`，不引入 pandas、numpy、数据层、因子层或策略层。
+分层依赖是单向的：`data_query` / `batch_query` → `update` → `planner` / `merge` / `storage` / `duckdb_verify` / `metadata` → `standardize` / `quality` / `market_calendar` → `schema` / `config` / `utils`；`summary` 只依赖 `storage`（因此这一层完全没有 DuckDB）。`storage` 与 `providers` 互不感知。`universe` 是独立于行情管道的一层（只依赖 `schema`/`config`/`errors`），由 `batch_query` 消费，行情管道本身不依赖它，因此两者可各自演进。`portfolio_sys` 位于 `strategy_sys` 之上，只依赖 `strategy_sys.contracts`、`factor_sys.universe` 与 `data_sys.schema` 里的 ticker 常量（项目唯一真源），不依赖任何读文件、行情、网络或存储模块；`portfolio_sys/constructors/` 这一子包同样只依赖 `portfolio_sys.contracts` / `portfolio_sys.errors`，不引入 pandas、numpy、数据层、因子层或策略层；`portfolio_sys/registry.py` 也只依赖标准库与 `portfolio_sys.contracts` / `portfolio_sys.errors`，不在模块顶层引用任何具体构建器，因此具体规则仍由调用方显式 `register`，且 `contracts.py` 与各构建器都不反向依赖 registry。`portfolio_sys/transition.py` 同样只依赖标准库与 `portfolio_sys.contracts` / `portfolio_sys.errors`（ticker 规则、日期规则与有限数校验都复用契约里的同一份实现，而非再写一套），不读价格、不看交易日历、不跑构建器、不查 registry、不生成订单或股数，且 `contracts.py`、各构建器与 registry 都不反向依赖它。
 
 ## 8. 运行一个因子截面
 
@@ -788,12 +789,174 @@ rank  symbol  score
 - `StrategyRunner` 按 `required_factors` 逐个调用 `FactorStore.read(name, version, as_of_date)`，再把策略返回的结果与**本次运行**核对：策略 spec、决策日、股票池（**对象身份**，不只是相同的代码列表）以及因子要求，任何一项不符都会失败而不是被记录下来。
 - `StrategyResult` 每一行都带 `strategy_name` / `strategy_version`，结果对象本身带完整 `strategy_spec` 与 `factor_requirements`；`StrategyRunOutcome` 原样携带它们，所以打印出来的清单永远能回溯到「哪条规则、哪个策略版本、读了哪个因子版本、哪一天、哪个数据根目录」。
 
-本入口刻意**不包含**：批量策略调度与调仓日历、`StrategyResult` 持久化、组合构建与目标权重、现金与换手约束、下单与成交、交易成本与滑点、回测与收益曲线。这些都建在这次得到的 `StrategyResult` 之上。
+本入口刻意**不包含**：批量策略调度与调仓日历、`StrategyResult` 持久化、组合构建与目标权重、现金与换手约束、下单与成交、交易成本与滑点、回测与收益曲线。这些都建在这次得到的 `StrategyResult` 之上——其中「目标权重 + 权重差异」已经由 §12 的组合层命令实现。
 
-## 12. 测试
+## 12. 运行一个单日组合构建（目标权重与权重变化）
+
+组合层的**最小真实入口**：给出「因子名 + 精确因子版本 + Top N + 决策日 + 现金目标 + 单股上限 + 当前组合」，命令先用已有的策略入口选出该决策日的标的，再用 `CappedScoreWeightedConstructor` 把它们变成**目标权重**，最后打印「当前组合 → 目标组合」的**纯权重差异**。它不重算因子、不写 Panel、不保存任何状态、也不生成订单。
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest            # 全部 2434 项
+# 1) 首次建仓：账户里只有现金（最简单的用法）
+python scripts/run_portfolio.py `
+  --factor momentum_12_1 `
+  --factor-version 1.0.0 `
+  --top-n 10 `
+  --as-of 2025-12-24 `
+  --target-cash-weight 0.10 `
+  --max-single-weight 0.25 `
+  --initial-cash
+
+# 2) 调仓：手工说明账户此刻的样子（权重之和必须是 100%）
+python scripts/run_portfolio.py `
+  --factor momentum_12_1 `
+  --factor-version 1.0.0 `
+  --top-n 10 `
+  --as-of 2025-12-24 `
+  --target-cash-weight 0.10 `
+  --max-single-weight 0.25 `
+  --current-as-of 2025-12-17 `
+  --current-position AVGO=0.40 `
+  --current-position GOOGL=0.30 `
+  --current-position TSLA=0.20 `
+  --current-cash-weight 0.10
+```
+
+### 参数
+
+| 参数 | 含义 |
+| --- | --- |
+| `--factor NAME` | 必填。策略排序所用的因子名，例如 `momentum_12_1` |
+| `--factor-version VERSION` | **必填**。要读取的**精确**因子版本，例如 `1.0.0`；没有默认值，否则无法判断目标权重来自哪一版 Panel |
+| `--top-n N` | 必填。入选标的数量，正整数；`0` / 负数由策略规则拒绝，`abc` / `1.5` 由 argparse 拒绝 |
+| `--as-of YYYY-MM-DD` | 必填。决策日，只接受纯 ISO 日期，原样交给策略入口 |
+| `--strategy-version VERSION` | 可选，默认 `1.0.0`；写进策略身份并随目标权重传递 |
+| `--data-root PATH` | 可选。Panel 读取根目录 `<PATH>/factors/panels`；默认 `PipelineConfig().data_root` |
+| `--universe-path PATH` | 可选。静态股票池 CSV；默认 `config/universe_seed.csv` |
+| `--target-cash-weight WEIGHT` | 必填。目标必须留在现金里的比例，范围 `[0, 1]`；它就是 `PortfolioConstraints.cash_weight` |
+| `--max-single-weight WEIGHT` | 必填。单只标的可占的最大比例，范围 `(0, 1]`；它就是 `PortfolioConstraints.max_single_weight` |
+| `--initial-cash` | 模式 A：账户里只有现金（100%），日期取 `--as-of`。**不能**与任何 `--current-*` 同时出现 |
+| `--current-as-of YYYY-MM-DD` | 模式 B 必填。这份当前账户属于哪一天，**不得晚于** `--as-of` |
+| `--current-position SYMBOL=WEIGHT` | 模式 B 的持仓，可重复多次；代码不 trim、不自动大写、不修正 |
+| `--current-cash-weight WEIGHT` | 模式 B 必填。当前现金比例 |
+
+### 调用链
+
+每一步都只走该层已有的公开接口，脚本自己**不实现**选股规则、权重规则或存储布局：
+
+```text
+run_strategy(...)                      # 策略入口：只读已存 Panel
+→ StrategyResult                       # 该决策日的截面（含策略/因子版本）
+→ PortfolioState                       # 当前组合：全现金，或手工输入
+→ PortfolioConstraints                 # 现金目标 + 单股上限
+→ PortfolioContext(date, result, state, constraints)
+→ 本次调用新建的 PortfolioConstructorRegistry()
+→ registry.register(CappedScoreWeightedConstructor) → create(完整 PortfolioConstructionSpec)
+→ constructor.construct(context)       # registry 返回的实例负责权重
+→ TargetPortfolio
+→ build_portfolio_transition(current_state=..., target_portfolio=...)
+→ 打印目标权重 + 权重差异
+```
+
+`PortfolioConstructorRegistry` 仍然**没有默认实例、也不会自动注册**：命令行只为这一次运行建表、注册当前唯一真实存在的规则，并用 `create()` 返回的实例去构建。也因此没有 `--constructor` 参数——只有一个真实规则时，加一个选择开关只会伪造不存在的通用性；新增规则应是一次 registry 注册，而不是一个新参数。
+
+### 输出
+
+上面第一条命令在 `2025-12-24` 上的真实输出（股票池 20 只、`--top-n 10`；字段与表头顺序固定）：
+
+```text
+as_of_date: 2025-12-24
+current_state_as_of_date: 2025-12-24
+strategy_name: top_10_by_momentum_12_1
+strategy_version: 1.0.0
+required_factor: momentum_12_1/1.0.0
+construction_name: capped_score_weighted
+construction_version: 1.0.0
+target_cash_weight: 0.100000
+max_single_weight: 0.250000
+selected_count: 10
+target_position_count: 10
+buy_weight: 0.900000
+sell_weight: 0.000000
+cash_weight_change: -0.900000
+turnover: 0.900000
+target:
+symbol  target_weight
+AVGO    0.193671
+BRK.B   0.032028
+GOOGL   0.178034
+JNJ     0.122435
+JPM     0.074625
+LLY     0.107454
+MSFT    0.024897
+NVDA    0.094499
+WMT     0.036315
+XOM     0.036043
+transition:
+symbol  current_weight  target_weight  weight_change  status
+AVGO    0.000000        0.193671       0.193671       entry
+BRK.B   0.000000        0.032028       0.032028       entry
+GOOGL   0.000000        0.178034       0.178034       entry
+JNJ     0.000000        0.122435       0.122435       entry
+JPM     0.000000        0.074625       0.074625       entry
+LLY     0.000000        0.107454       0.107454       entry
+MSFT    0.000000        0.024897       0.024897       entry
+NVDA    0.000000        0.094499       0.094499       entry
+WMT     0.000000        0.036315       0.036315       entry
+XOM     0.000000        0.036043       0.036043       entry
+cash:
+current_weight: 1.000000
+target_weight: 0.100000
+weight_change: -0.900000
+```
+
+第二条（调仓）命令的元数据部分则是：
+
+```text
+as_of_date: 2025-12-24
+current_state_as_of_date: 2025-12-17
+...
+buy_weight: 0.528295
+sell_weight: 0.528295
+cash_weight_change: 0.000000
+turnover: 0.528295
+```
+
+它的 `transition:` 表按「目标在前、只有当前账户才持有的标的在后」列出全部 11 行：`AVGO` / `GOOGL` 是 `decrease`，`TSLA` 是 `exit`（当前持有、目标不要），其余入选标的是 `entry`。
+
+- 所有权重固定 6 位小数；`target:` 只列出 `TargetPortfolio.positions`（按构建器的顺序，也就是股票池顺序），**不含现金伪代码**；
+- `transition:` 是两边的**完整并集**，一行一只标的：`entry`（原来没有、目标要）、`exit`（原来有、目标不要）、`increase`、`decrease`、`unchanged`；
+- 现金不是一行，而是最后的 `cash:` 三行；
+- `turnover` 是**单边**换手：`0.5 * (Σ|Δ权重| + |Δ现金|)`，对两个完整组合而言等于 `max(buy_weight, sell_weight)`——卖一只买一只是 1 次换手，不是 2 次；
+- `status` 只描述**目标权重**的变化方向，不是订单方向，更不是成交；
+- `target:` / `transition:` 没有内容时（空选股、或全现金到全现金）打印表头与 `none`；
+- 没有任何 DataFrame index、`dtype` 或 `NaN` 渲染。
+
+### 需要知道的几点
+
+1. **只读已存的 Panel**：命令读取 `<data-root>/factors/panels` 下**已落盘**的截面，**不联网、不下载、不重算因子、不写任何 Panel**，也**不会**保存 `StrategyResult` / `TargetPortfolio` / `PortfolioTransition`。
+2. **`--factor-version` 是强制要求**：因子名 + 精确版本既构成策略的 `FactorRequirement`，也随目标权重与权重差异一起传递；同一个因子名换一个版本就是另一份 Panel、另一个策略身份。
+3. **输出是权重，不是订单**：这里只有「目标权重」与「权重差异」，没有股数、成交价、佣金、滑点、成交或收益。把它变成交易属于执行层。
+4. **当前组合是二选一的输入**：`--initial-cash`，或 `--current-as-of` + 任意个 `--current-position` + `--current-cash-weight`。两种模式不能混用；手工模式的持仓权重加现金必须正好是 100%（容差 `1e-12`），且 `--current-as-of` **不得晚于** `--as-of`（否则就是 look-ahead）。
+5. **当前 state 不会被保存**：它只是这一条命令的输入，没有 `--load-state` / `--save-state`，也没有任何状态文件会被创建或修改——下一次运行必须重新说明账户。
+6. **首次建仓用 `--initial-cash`**：它等价于「持仓为空、现金 100%、日期取决策日」的状态。
+7. **缺 Panel 时先算因子**：先运行 §8 的单日因子命令（或 §9 的批量命令）把该决策日的 Panel 落盘，再运行本命令：
+
+   ```powershell
+   python scripts/run_factor.py --factor momentum_12_1 --as-of 2025-12-24
+   python scripts/run_portfolio.py --factor momentum_12_1 --factor-version 1.0.0 `
+     --top-n 10 --as-of 2025-12-24 --target-cash-weight 0.10 `
+     --max-single-weight 0.25 --initial-cash
+   ```
+
+8. **空选择不是错误**：没有可排名标的时 `selected_count: 0`，目标就是全现金（`positions` 为空、现金 100%），退出码仍是 `0`。
+9. **退出码**：`0` 成功（含空选择）；`1` 领域或命令语义错误（Panel 缺失/损坏、策略或因子参数非法、股票池不可读、当前 state 非法或与 `--initial-cash` 冲突、`SYMBOL=WEIGHT` 无法解析、空白 `--data-root`、cap 与现金目标不可行、选中标的分值非正等），stderr 一行 `error: ...`（多个问题时按项目风格逐条 `- ` 列出，但**不打印 traceback**）；`2` 由 argparse 给出（缺参数、未知参数、权重不是数字）。
+
+本入口刻意**不包含**：状态持久化（读/写账户文件）、订单与股数、成交价与实际成交、佣金与滑点、批量日期与调仓日历、回测与收益曲线——这些都建在这次得到的 `PortfolioTransition` 之上。
+
+## 13. 测试
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest            # 全部 3099 项
 .\.venv\Scripts\python.exe -m pytest -v         # 逐项
 .\.venv\Scripts\python.exe -m ruff check .      # 静态检查
 ```
@@ -814,8 +977,9 @@ rank  symbol  score
 - `test_run_factor_batch.py` — 批量入口：受控替身验证**每个选中日期只调用一次既有 `run_factor()`**、参数（因子 / 根目录 / 股票池 / 日历 / `force`）原样传递、`hit/miss/forced` 计数、单个日期失败后继续且顺序稳定、质量报告不算失败、未知因子 / 未知日历 / 空白 `--data-root` 在循环前失败；**每个选中日期恰好对应一条结果或一条失败**（缺口对象在构造时被拒绝、`format_summary()` 不会 `KeyError`、成功与失败混排仍能正常渲染）；manifest 字段与顺序、相对路径、空选择、两次运行两份独立 manifest、原子写失败不损坏旧文件且退出码为 `1`；真实 Parquet 端到端（`miss` → `hit` 文件字节不变、`--force` 全量重算、损坏的 Panel 只影响它自己那一天）；CLI 输出、退出码、argparse 的 `2`、从项目根目录真实进程运行；**架构守卫**（不 import 公式 / 网络 / 子进程，不重算 Panel 路径，只调用单日入口与日期规则）。
 - `test_analyze_factor.py` — 多日期研究分析入口：受控替身验证**只调用既有 `run_factor_batch()`**（因子 / 区间 / 频率 / anchor / 根目录 / 股票池 / 日历 / `force` 原样传递）、只用本次 batch 的 Panel（目录里无关的 Panel 不会被读取、也不会被改写）、每个 Panel **恰好调用一次** `ForwardReturnCalculator.compute(panel, horizon)`、三种分析拿到同一组 panels / labels；真实 Parquet 端到端（`miss` → `hit` 文件字节不变、`--force` 全量重算、损坏的 Panel 使整次分析被拒绝且不写报告）；`weekly + THU + 20`（WED 与 THU 选到不同日期、biweekly 隔周、monthly 月末与无 anchor、monthly 带 anchor 退出码 `2`）、非法 horizon / quantiles / min-pairs（argparse 与函数两条路径）、空日程与失败日期（错误含失败数与 batch manifest 路径）、尾部行情不足的日期仍保留在报告中（`pair_coverage = 0`、`ic` 为空，不填零不删除）；报告的六份文件、列与既有 `to_frame()` 一致、metadata 的 `null`（不写 `NaN` / `Infinity`）与相对清单路径、两次运行两份独立报告、写入失败不留半成品目录且不影响 Panel 与 manifest；CLI 摘要顺序 / 退出码 / 单行 `error:` 风格、从项目根目录真实进程运行；**batch 对账**（结果对象在构造时核对 `selected_dates`、各期成功 outcome 的日期、`factor_panels` 的日期与**对象身份**：同日期同版本的重建 Panel、另一份 batch 的 Panel、缺一期的 Panel、被改名的 batch 都被拒绝，而真实运行的 Panel 与 batch 里的 Panel 是同一批对象）；**架构守卫**（不 import 公式 / 网络 / 子进程 / Store，不重算 Spearman 或分位分组，只构造报告路径）。
 - `test_run_strategy.py` — 单日策略入口（真实临时 Parquet Panel + 临时股票池）：端到端验证**运行的是 `registry.create()` 返回的实例**（Runner 收到的就是它，结果对象也是 Runner 返回的那一个）、排名的分数 / 名次用独立 `sorted` 对照、`--as-of` 原样传给 Runner；规则语义（降序、平分按 symbol 升序、`top_n` 大于股票池、全部不合格时 `selected_count = 0` 仍成功退出）；精确版本（同一因子名两个版本并存，`read` 只被调用于被请求的版本，输出与 `factor_requirements` 都指向它，Panel 字节不变）；失败路径（Panel 缺失 / 日期无 Panel / 周末 / `--top-n 0` 与负数 / 非法日期 / 空白参数：退出码 `1`、stderr 首行 `error: ...`、无 traceback、不创建目录；`--top-n abc`、缺参数、未知参数：argparse 的 `2`）；`--data-root` 与 `--universe-path` 的实际作用范围；输出契约（整段文本、字段顺序、6 位小数、只含入选行、无 index / `dtype` / `NaN`、每条 `required_factor`）；`StrategyRunOutcome` 的不可变、自洽校验（`selected_count` 与 frame 不符、因子要求不是结果自己的、`data_root` 不是 Path 等一律拒绝）与 frame 隔离；离线边界（socket / `FactorRunner.run` / `write` 全部被禁用仍成功，`data_root` 下只有 Panel 目录）；**AST 守卫**（只 import 三层公开接口、不 import pandas / pyarrow / DuckDB / 网络 / `factors`、不引用 Store 或 Registry 私有成员、不拼 Hive 路径、没有算术形式的选股规则、没有权重 / 订单 / 回测命名）；从项目根目录真实进程运行。
+- `test_run_portfolio.py` — 单日组合入口（真实临时 Parquet Panel + 临时股票池）：端到端走完 `run_strategy → StrategyResult → PortfolioState → PortfolioConstraints → PortfolioContext → registry → constructor → TargetPortfolio → transition`，权重用独立的「按分值比例 + 封顶再分配」实现对照；`--initial-cash` 首次建仓的 `turnover` 等于目标持仓权重、`buy_weight` / `sell_weight` / `cash_weight_change` 与 transition 行一致；手工 state 的调仓能同时出现 `entry` / `exit` / `increase` / `decrease` / `unchanged`，仅当前持有的标的保留在并集末尾，行顺序 = 目标顺序 + 当前独有顺序；来源链（`create()` 返回的实例就是构建权重的那一个、每次运行一张新 registry、精确因子版本 / 策略版本 / 构建器 spec / 约束随目标与差异传递、`outcome` 三个部件是同一批对象）；构建器真实语义（分值比例、单股封顶与再分配、cap 与现金目标不可行、选中分值非正、空选股 = 全现金目标）；两种 state 模式的全部参数组合（`--initial-cash` 与 `--current-*` 冲突、缺 `--current-as-of` / `--current-cash-weight`、state 早于或等于决策日合法、晚于决策日拒绝、手工全现金、重复 symbol、加总不足 100%、`CASH=...`、`NaN` / `inf` / 负数 / 0、`SYMBOL=WEIGHT` 的各种畸形写法）；输出契约（整段文本、字段顺序、6 位小数、`target:` 无现金伪代码、`transition:` 完整并集、五种 status、空表 `none`、无 index / `dtype` / `NaN`、行尾无空格）；CLI（`main` 成功与失败、单行 `error:`、argparse 的 `2`、可从函数直接调用、`__all__`、从项目根目录真实进程运行三种退出码）；离线与只读（socket / `FactorRunner.run` / `write` 全被禁用仍成功、Panel 字节与 mtime 不变、不创建 state / orders / reports 目录）；**AST 守卫**（只 import 四层公开接口、不 import pandas / pyarrow / DuckDB / 网络 / `portfolio_sys` 子模块私有路径、不打开或写任何文件、没有除法或乘法形式的权重规则、没有订单 / 成交 / 成本 / 频率命名、不复制 Runner / Store / constructor / transition 的逻辑）。
 
-## 13. 已知限制与后续
+## 14. 已知限制与后续
 
 **本 MVP 明确不包含**（属于设计文档后续阶段）：
 
@@ -824,7 +988,7 @@ rank  symbol  score
 - 证券主数据只覆盖股票池所需的 5 个字段：无 CIK、无退市历史、无 ticker 历史映射；
 - `UniverseSnapshot` 的完整筛选规则（`dollar_volume` 等字段已就绪，筛选逻辑待在股票池模块实现）；
 - `scripts/download_data.py` 的 Google Drive 整包同步（设计文档 §7）；
-- 因子层的**策略与回测**：§10 只做研究统计（Panel + 复权收盘标签 + IC + 分位收益），§11 只做**单日入选清单**；批量策略调度、`StrategyResult` 持久化、组合构建（目标权重、现金、换手与流动性约束）、开盘成交、成本与滑点、回测收益都还没有；manifest 也仍然没有读取端；
+- 因子层的**策略与回测**：§10 只做研究统计（Panel + 复权收盘标签 + IC + 分位收益），§11 只做**单日入选清单**，§12 只做**单日目标权重 + 权重差异**；批量策略调度与调仓日历、`StrategyResult` / `TargetPortfolio` / `PortfolioTransition` 的持久化、账户状态的持久化（读/写 state 文件）、股数与下单、开盘成交、成本与滑点、回测收益都还没有；manifest 也仍然没有读取端；
 
 **需要注意的行为**：
 

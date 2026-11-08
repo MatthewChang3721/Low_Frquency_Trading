@@ -1202,14 +1202,19 @@ def test_the_package_root_exports_the_new_error() -> None:
         "PortfolioConstructionError",
         "PortfolioConstructionSpec",
         "PortfolioConstructor",
+        "PortfolioConstructorRegistry",
         "PortfolioContext",
         "PortfolioContractError",
         "PortfolioError",
         "PortfolioPosition",
+        "PortfolioRegistryError",
         "PortfolioState",
+        "PortfolioTransition",
+        "PortfolioWeightChange",
         "TargetPortfolio",
         "WEIGHT_TOLERANCE",
         "__version__",
+        "build_portfolio_transition",
     ]
     for name in portfolio_sys.__all__:
         assert hasattr(portfolio_sys, name), name

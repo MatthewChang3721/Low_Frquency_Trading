@@ -39,6 +39,7 @@ packages = [
     "strategy_sys",
     "strategy_sys.strategies",
     "strategy_sys.strategies.single_factor",
+    "backtest_sys",
 ]
 
 [tool.pytest.ini_options]
